@@ -16,12 +16,13 @@ source = ["src"]
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+extend-exclude = ["alembic"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "S"]
 # tests may use assert (S101) — allowed there
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101"]
+"tests/*" = ["S101", "E501", "S105", "S106", "S107"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]

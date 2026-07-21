@@ -1,13 +1,27 @@
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [main, trunk]
   pull_request:
     branches: [main]
 
 jobs:
   quality-gate-backend:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: youhue
+          POSTGRES_PASSWORD: youhue
+          POSTGRES_DB: youhue_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL: postgresql+psycopg://youhue:youhue@localhost:5432/youhue_dev
+      DATABASE_URL_TEST: postgresql+psycopg://youhue:youhue@localhost:5432/youhue_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -17,6 +31,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
+      - name: Create test database
+        run: >-
+          python -c "import psycopg; c=psycopg.connect('postgresql://youhue:youhue@localhost:5432/youhue_dev',
+          autocommit=True); c.execute('CREATE DATABASE youhue_test'); c.close()"
+      - name: Migrate (dev schema)
+        run: alembic upgrade head
       - name: Lint (ruff)
         run: ruff check .
       - name: Types (mypy, strict)

@@ -23,8 +23,8 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
 
     # ---- database (owner provides DATABASE_URL in the active env; dev default = local Docker) ----
-    database_url: str = "postgresql+psycopg://youhue:youhue@localhost:5432/youhue_dev"
-    database_url_test: str = "postgresql+psycopg://youhue:youhue@localhost:5432/youhue_test"
+    database_url: str = "postgresql+psycopg://youhue:youhue@localhost:5433/youhue_dev"
+    database_url_test: str = "postgresql+psycopg://youhue:youhue@localhost:5433/youhue_test"
 
     # ---- auth / session (INFRA-01) ----
     jwt_secret: str = Field(default_factory=lambda: secrets.token_urlsafe(48))

@@ -1,0 +1,98 @@
+"""Test harness — real Postgres (youhue_test), schema per session, truncate per test.
+
+The FastAPI `get_db` dependency is overridden to share the test session so endpoint writes and
+test assertions see the same data.
+"""
+from collections.abc import Callable, Generator
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session, sessionmaker
+
+from src.application.auth.security import hash_password
+from src.config import settings
+from src.domain.enums import SchoolStatus, StaffRole, StaffStatus, StudentAgeBand
+from src.infrastructure import models  # noqa: F401  (register tables)
+from src.infrastructure.db import Base, get_db
+from src.infrastructure.models.identity import School, StaffAccount, Student
+from src.main import app
+
+_engine = create_engine(settings.database_url_test, future=True)
+_TestSession = sessionmaker(bind=_engine, autoflush=False, expire_on_commit=False)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _schema() -> Generator[None, None, None]:
+    Base.metadata.drop_all(_engine)
+    Base.metadata.create_all(_engine)
+    yield
+    Base.metadata.drop_all(_engine)
+
+
+@pytest.fixture()
+def db() -> Generator[Session, None, None]:
+    session = _TestSession()
+    try:
+        yield session
+    finally:
+        session.rollback()
+        session.close()
+
+
+@pytest.fixture(autouse=True)
+def _clean() -> Generator[None, None, None]:
+    yield
+    with _engine.begin() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(text(f'TRUNCATE TABLE "{table.name}" CASCADE'))
+
+
+@pytest.fixture()
+def client(db: Session) -> Generator[TestClient, None, None]:
+    def _override() -> Generator[Session, None, None]:
+        yield db
+
+    app.dependency_overrides[get_db] = _override
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture()
+def make_school(db: Session) -> Callable[..., School]:
+    def _make(code: str = "SCH-001", status: SchoolStatus = SchoolStatus.active,
+              name: str = "Oakwood") -> School:
+        school = School(name=name, timezone="UTC", sign_in_code=code, status=status)
+        db.add(school)
+        db.commit()
+        db.refresh(school)
+        return school
+    return _make
+
+
+@pytest.fixture()
+def make_staff(db: Session) -> Callable[..., StaffAccount]:
+    def _make(school: School, email: str = "t@oakwood.edu", password: str | None = "Password123",
+              role: StaffRole = StaffRole.teacher, mfa: bool = False) -> StaffAccount:
+        staff = StaffAccount(
+            school_id=school.id, email=email.lower(),
+            password_hash=hash_password(password) if password else None,
+            role=role, status=StaffStatus.active, mfa_enabled=mfa,
+        )
+        db.add(staff)
+        db.commit()
+        db.refresh(staff)
+        return staff
+    return _make
+
+
+@pytest.fixture()
+def make_student(db: Session) -> Callable[..., Student]:
+    def _make(school: School, name: str = "Amy") -> Student:
+        student = Student(school_id=school.id, display_name=name, age_band=StudentAgeBand.b8_11)
+        db.add(student)
+        db.commit()
+        db.refresh(student)
+        return student
+    return _make
