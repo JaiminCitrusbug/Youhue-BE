@@ -1,4 +1,5 @@
 """Cryptographic primitives: password hashing (bcrypt), JWT, and at-rest token/code hashing."""
+import base64
 import hashlib
 import secrets
 from datetime import datetime
@@ -10,15 +11,25 @@ import jwt
 from src.config import settings
 
 
+def _prehash(plain: str) -> bytes:
+    """base64(sha256) — keeps bcrypt input <= 44 bytes: no 72-byte truncation, no NUL bytes."""
+    return base64.b64encode(hashlib.sha256(plain.encode()).digest())
+
+
 def hash_password(plain: str) -> str:
-    return str(bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode())
+    return str(bcrypt.hashpw(_prehash(plain), bcrypt.gensalt()).decode())
 
 
 def verify_password(plain: str, hashed: str) -> bool:
     try:
-        return bool(bcrypt.checkpw(plain.encode(), hashed.encode()))
+        return bool(bcrypt.checkpw(_prehash(plain), hashed.encode()))
     except ValueError:
         return False
+
+
+# Constant-time target: sign-in verifies against this when no password account exists, so an
+# unknown/SSO-only email costs the same bcrypt time as a real one (no user-enumeration timing leak).
+DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(16))
 
 
 def hash_secret(raw: str) -> str:

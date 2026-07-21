@@ -34,11 +34,12 @@ def sign_in(db: Session, email: str, password: str, device_id: str | None = None
     if lockout.is_locked(db, ident):
         raise HTTPException(status.HTTP_423_LOCKED, "Account temporarily locked")
     staff = _find_active_staff_by_email(db, ident)
-    if (
-        staff is None
-        or staff.password_hash is None
-        or not security.verify_password(password, staff.password_hash)
-    ):
+    # Always run bcrypt (dummy hash if no password account) -> constant time, no user-enumeration.
+    target_hash = (
+        staff.password_hash if staff and staff.password_hash else security.DUMMY_PASSWORD_HASH
+    )
+    password_ok = security.verify_password(password, target_hash)
+    if staff is None or staff.password_hash is None or not password_ok:
         lockout.record_attempt(db, ident, succeeded=False)
         raise _GENERIC_401
     lockout.record_attempt(db, ident, succeeded=True)
@@ -72,17 +73,24 @@ def _issue_mfa_otp(db: Session, subject_id: uuid.UUID, email: str) -> None:
 
 
 def verify_mfa(db: Session, subject_id: uuid.UUID, code: str) -> bool:
+    mfa_ident = f"mfa:{subject_id}"
+    if lockout.is_locked(db, mfa_ident, settings.mfa_max_attempts):
+        return False  # too many wrong OTP guesses -> brute-force cap
     stmt = (
         select(MfaOtp)
         .where(MfaOtp.subject_id == subject_id, MfaOtp.consumed_at.is_(None))
         .order_by(MfaOtp.expires_at.desc())
     )
     otp = db.scalar(stmt)
-    if otp is None or otp.expires_at <= datetime.now(UTC):
-        return False
-    if otp.code_hash != security.hash_secret(code):
+    if (
+        otp is None
+        or otp.expires_at <= datetime.now(UTC)
+        or otp.code_hash != security.hash_secret(code)
+    ):
+        lockout.record_attempt(db, mfa_ident, succeeded=False)
         return False
     otp.consumed_at = datetime.now(UTC)
+    lockout.record_attempt(db, mfa_ident, succeeded=True)
     db.flush()
     return True
 
@@ -101,7 +109,7 @@ def forgot_password(db: Session, email: str) -> None:
         )
     )
     db.flush()
-    link = f"{settings.oauth_redirect_base}/reset-password?token={raw}"
+    link = f"{settings.frontend_base_url}/reset-password?token={raw}"
     send_email(staff.email, "Reset your Youhue password", f"Reset link: {link}")
 
 

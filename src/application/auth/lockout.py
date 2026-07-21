@@ -13,7 +13,8 @@ def record_attempt(db: Session, identifier: str, succeeded: bool) -> None:
     db.flush()
 
 
-def is_locked(db: Session, identifier: str) -> bool:
+def is_locked(db: Session, identifier: str, max_attempts: int | None = None) -> bool:
+    limit = max_attempts if max_attempts is not None else settings.lockout_max_attempts
     window_start = datetime.now(UTC) - timedelta(minutes=settings.lockout_window_minutes)
     stmt = (
         select(LoginAttempt)
@@ -25,4 +26,4 @@ def is_locked(db: Session, identifier: str) -> bool:
         if attempt.succeeded:
             break
         consecutive_failures += 1
-    return consecutive_failures >= settings.lockout_max_attempts
+    return consecutive_failures >= limit

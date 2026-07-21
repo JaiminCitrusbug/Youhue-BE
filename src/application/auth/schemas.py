@@ -6,7 +6,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 class StaffSignIn(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(max_length=256)
     device_id: str | None = None
 
 
@@ -22,7 +22,7 @@ class ForgotPassword(BaseModel):
 
 class ResetPassword(BaseModel):
     token: str
-    new_password: str = Field(min_length=8)
+    new_password: str = Field(min_length=8, max_length=256)
 
 
 class MfaVerify(BaseModel):

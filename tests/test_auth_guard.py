@@ -34,20 +34,35 @@ def test_require_same_school_denies_null_school():
 
 
 def test_sso_first_match_links_existing_email(db, make_school, make_staff):
-    staff = make_staff(make_school(), email="t@oakwood.edu")
-    resolved = sso_svc.resolve_or_link(db, subject="google-sub-1", email="t@oakwood.edu")
+    school = make_school()
+    staff = make_staff(school, email="t@oakwood.edu")
+    resolved = sso_svc.resolve_or_link(db, subject="google-sub-1", email="t@oakwood.edu", school_id=school.id)
     assert resolved.id == staff.id
     assert resolved.sso_subject == "google-sub-1"
-    # subsequent SSO resolves by subject (even with a different email claim)
-    again = sso_svc.resolve_or_link(db, subject="google-sub-1", email="other@x.edu")
+    # subsequent SSO resolves by subject within the same school (even with a different email claim)
+    again = sso_svc.resolve_or_link(db, subject="google-sub-1", email="other@x.edu", school_id=school.id)
     assert again.id == staff.id
 
 
 def test_sso_unknown_email_denied(db, make_school):
-    make_school()
+    school = make_school()
     with pytest.raises(HTTPException) as exc:
-        sso_svc.resolve_or_link(db, subject="sub-x", email="ghost@nowhere.edu")
+        sso_svc.resolve_or_link(db, subject="sub-x", email="ghost@nowhere.edu", school_id=school.id)
     assert exc.value.status_code == 401
+
+
+def test_sso_does_not_resolve_across_schools(db, make_school, make_staff):
+    # Same email at two schools (unique only per school). SSO into School B must resolve/link
+    # ONLY School B's account and never touch School A's (the B1 cross-tenant fix).
+    school_a = make_school(code="AAA")
+    school_b = make_school(code="BBB")
+    staff_a = make_staff(school_a, email="dual@oakwood.edu")
+    staff_b = make_staff(school_b, email="dual@oakwood.edu")
+    resolved = sso_svc.resolve_or_link(db, subject="ms-sub-9", email="dual@oakwood.edu", school_id=school_b.id)
+    assert resolved.id == staff_b.id
+    assert resolved.id != staff_a.id
+    db.refresh(staff_a)
+    assert staff_a.sso_subject is None  # School A's account untouched
 
 
 def test_staff_dependency_rejects_student_session(db, make_school, make_student):

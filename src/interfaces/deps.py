@@ -23,17 +23,16 @@ _bearer = HTTPBearer(auto_error=True)
 DbDep = Annotated[Session, Depends(get_db)]
 
 
-def get_current_session(
-    creds: Annotated[HTTPAuthorizationCredentials, Depends(_bearer)],
-    db: DbDep,
-    allow_mfa_pending: bool = False,
-) -> AuthSession:
+def _load_session(db: Session, token: str, *, allow_mfa_pending: bool) -> AuthSession:
     try:
-        payload = decode_jwt(creds.credentials)
+        payload = decode_jwt(token)
     except jwt.PyJWTError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token") from exc
     jti = payload.get("jti")
-    sess = sessions.get_active_session(db, uuid.UUID(jti)) if jti else None
+    try:
+        sess = sessions.get_active_session(db, uuid.UUID(str(jti))) if jti else None
+    except (ValueError, TypeError):
+        sess = None  # malformed jti in a validly-signed token -> treat as no session (401)
     if sess is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired or revoked")
     if sess.mfa_pending and not allow_mfa_pending:
@@ -41,7 +40,20 @@ def get_current_session(
     return sess
 
 
+def get_current_session(
+    creds: Annotated[HTTPAuthorizationCredentials, Depends(_bearer)], db: DbDep
+) -> AuthSession:
+    return _load_session(db, creds.credentials, allow_mfa_pending=False)
+
+
+def get_session_allow_mfa(
+    creds: Annotated[HTTPAuthorizationCredentials, Depends(_bearer)], db: DbDep
+) -> AuthSession:
+    return _load_session(db, creds.credentials, allow_mfa_pending=True)
+
+
 SessionDep = Annotated[AuthSession, Depends(get_current_session)]
+AnySessionDep = Annotated[AuthSession, Depends(get_session_allow_mfa)]
 
 
 def get_current_staff(sess: SessionDep, db: DbDep) -> StaffAccount:

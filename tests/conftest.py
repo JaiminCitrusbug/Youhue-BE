@@ -16,6 +16,7 @@ from src.domain.enums import SchoolStatus, StaffRole, StaffStatus, StudentAgeBan
 from src.infrastructure import models  # noqa: F401  (register tables)
 from src.infrastructure.db import Base, get_db
 from src.infrastructure.models.identity import School, StaffAccount, Student
+from src.interfaces.ratelimit import reset as reset_ratelimit
 from src.main import app
 
 _engine = create_engine(settings.database_url_test, future=True)
@@ -42,6 +43,7 @@ def db() -> Generator[Session, None, None]:
 
 @pytest.fixture(autouse=True)
 def _clean() -> Generator[None, None, None]:
+    reset_ratelimit()  # in-process limiter must not leak across tests
     yield
     with _engine.begin() as conn:
         for table in reversed(Base.metadata.sorted_tables):

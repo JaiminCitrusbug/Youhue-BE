@@ -8,10 +8,18 @@ deployed environment. Adapters (email, SSO, DB) are selected by env, per owner d
   - MFA = email OTP only (leadership/district/admin)
   - Risk thresholds + default concern words are env-driven (D-05/D-18 pending ratification)
 """
+import os
 import secrets
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _default_jwt_secret() -> str:
+    """Random per-process secret for local dev only; a deployed env MUST set JWT_SECRET."""
+    if os.getenv("ENVIRONMENT", "local").lower() in {"staging", "production"}:
+        raise ValueError("JWT_SECRET must be set explicitly in staging/production")
+    return secrets.token_urlsafe(48)
 
 
 class Settings(BaseSettings):
@@ -27,9 +35,8 @@ class Settings(BaseSettings):
     database_url_test: str = "postgresql+psycopg://youhue:youhue@localhost:5433/youhue_test"
 
     # ---- auth / session (INFRA-01) ----
-    jwt_secret: str = Field(default_factory=lambda: secrets.token_urlsafe(48))
+    jwt_secret: str = Field(default_factory=_default_jwt_secret)
     jwt_algorithm: str = "HS256"
-    access_token_ttl_minutes: int = 30
     staff_session_ttl_minutes: int = 720          # 12h staff working session
     student_session_ttl_minutes: int = 20         # short-lived, shared-device
     student_single_active_device: bool = True
@@ -46,6 +53,7 @@ class Settings(BaseSettings):
 
     # ---- staff SSO (INFRA-01) — real OAuth 2.0/OIDC, enabled per-provider when creds present ----
     oauth_redirect_base: str = "http://localhost:8000"
+    frontend_base_url: str = "http://localhost:5173"  # SPA base for user-facing links (reset)
     google_client_id: str | None = None
     google_client_secret: str | None = None
     microsoft_client_id: str | None = None
@@ -55,6 +63,7 @@ class Settings(BaseSettings):
     mfa_required_roles: str = "leadership,district,admin"
     mfa_otp_ttl_minutes: int = 10
     mfa_otp_length: int = 6
+    mfa_max_attempts: int = 5  # OTP verification attempt cap (anti-brute-force)
 
     # ---- risk pipeline (INFRA-06) — env-driven; D-05/D-18 pending ratification ----
     risk_immediate_threshold: float = 0.80        # >= immediate band

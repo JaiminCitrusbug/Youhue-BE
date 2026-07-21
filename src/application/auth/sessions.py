@@ -9,6 +9,7 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from src.application.auth.security import encode_jwt
+from src.config import settings
 from src.domain.enums import SessionKind
 from src.infrastructure.models.auth import AuthSession
 
@@ -26,7 +27,7 @@ def create_session(
     device_id: str | None = None,
     mfa_pending: bool = False,
 ) -> AuthSession:
-    if kind == SessionKind.student:
+    if kind == SessionKind.student and settings.student_single_active_device:
         # single active device: a new student sign-in ends any prior active student session
         revoke_all_for_subject(db, subject_id)
     sess = AuthSession(

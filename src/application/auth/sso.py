@@ -4,6 +4,8 @@
 and the first SSO matching an existing email links (both methods then resolve to one identity).
 The HTTP authorize/callback dance uses Authlib and is exercised only when creds are configured.
 """
+import uuid
+
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -23,14 +25,23 @@ def is_enabled(provider: str) -> bool:
     return False
 
 
-def resolve_or_link(db: Session, subject: str, email: str) -> StaffAccount:
-    """Return the StaffAccount for an SSO identity, linking on first match to an existing email."""
-    staff = db.scalar(select(StaffAccount).where(StaffAccount.sso_subject == subject))
+def resolve_or_link(db: Session, subject: str, email: str, school_id: uuid.UUID) -> StaffAccount:
+    """Resolve an SSO identity to a StaffAccount WITHIN the signing-in school, linking on first
+    match to an existing email. Email is unique per school, so every lookup is school-scoped —
+    an SSO identity can never resolve to (or link) an account in a different tenant.
+    """
+    staff = db.scalar(
+        select(StaffAccount).where(
+            StaffAccount.sso_subject == subject, StaffAccount.school_id == school_id
+        )
+    )
     if staff is not None:
         return staff
     staff = db.scalar(
         select(StaffAccount).where(
-            StaffAccount.email == email.lower(), StaffAccount.status == StaffStatus.active
+            StaffAccount.email == email.lower(),
+            StaffAccount.school_id == school_id,
+            StaffAccount.status == StaffStatus.active,
         )
     )
     if staff is None:
