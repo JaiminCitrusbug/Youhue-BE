@@ -1,0 +1,32 @@
+[project]
+name = "youhue-be"
+version = "0.1.0"
+description = "Youhue — Student Wellbeing Check-in Platform (backend, FastAPI)"
+requires-python = ">=3.12"
+
+# ---- gate tool config (the validation gate runs these) ----
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "--cov=src --cov-report=term-missing --cov-fail-under=80"
+
+[tool.coverage.run]
+source = ["src"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+# tests may use assert (S101) — allowed there
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]

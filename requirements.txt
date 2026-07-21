@@ -1,0 +1,5 @@
+# Youhue backend — runtime deps (pinned; see agents/tech-stack.md). FastAPI + Postgres stack.
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.10.4
+pydantic-settings==2.7.0
