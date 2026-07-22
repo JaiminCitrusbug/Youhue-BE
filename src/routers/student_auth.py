@@ -4,7 +4,7 @@ Split out of the shared `routers.auth` so the student sign-in surface owns its o
 evolve without touching staff/admin routes. Passwordless and rate-limited; a student session never
 resolves a staff route (enforced by the session-kind guard in auth_middleware). Thin router —
 business logic lives in src.application.auth.student."""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from src.application.auth import student as student_svc
 from src.infrastructure.middlewares.auth_middleware import DbDep
@@ -16,13 +16,19 @@ _throttle = [Depends(rate_limit)]
 
 
 @router.post("/sign-in", response_model=StudentSession, dependencies=_throttle)
-def student_sign_in(body: StudentSignIn, db: DbDep) -> StudentSession:
-    result = student_svc.sign_in(
-        db,
-        school_or_class_code=body.school_or_class_code,
-        qr_token=body.qr_token,
-        student_id=body.student_id,
-        device_id=body.device_id,
-    )
+def student_sign_in(body: StudentSignIn, request: Request, db: DbDep) -> StudentSession:
+    client_ip = request.client.host if request.client else None
+    try:
+        result = student_svc.sign_in(
+            db,
+            school_or_class_code=body.school_or_class_code,
+            qr_token=body.qr_token,
+            student_id=body.student_id,
+            device_id=body.device_id,
+            client_ip=client_ip,
+        )
+    except HTTPException:
+        db.commit()  # persist the failed-attempt record (escalation counter) before surfacing
+        raise
     db.commit()
     return result

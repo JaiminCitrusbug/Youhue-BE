@@ -215,6 +215,103 @@ def test_signin_is_rate_limited_429(client, make_school, make_student):
     assert last.status_code == 429
 
 
+# ---- failed-attempt escalation / abuse resistance (M1 hardening) -----------------------------
+# Exercised at the service layer so the (IP + code) key can be varied and the per-minute HTTP
+# limiter (a router Depends) doesn't mask the longer-window escalation being asserted here.
+
+def test_repeated_failed_attempts_on_a_code_escalate_to_429(db, make_school):
+    import pytest
+    from fastapi import HTTPException
+
+    from config.env_config import settings
+    from src.application.auth import student as student_svc
+
+    make_school(code="OAK-77")
+    ip = "10.0.0.1"
+    # A valid code + bogus student_id fails 404 each time (a code-enumeration / probing pattern).
+    for _ in range(settings.student_signin_max_attempts):
+        with pytest.raises(HTTPException) as exc:
+            student_svc.sign_in(
+                db, school_or_class_code="OAK-77", qr_token=None,
+                student_id=uuid.uuid4(), client_ip=ip,
+            )
+        assert exc.value.status_code == 404
+    # The next attempt from the SAME origin against THAT code is now refused (429), not 404.
+    with pytest.raises(HTTPException) as exc:
+        student_svc.sign_in(
+            db, school_or_class_code="OAK-77", qr_token=None,
+            student_id=uuid.uuid4(), client_ip=ip,
+        )
+    assert exc.value.status_code == 429
+
+
+def test_bad_actor_cannot_lock_the_whole_class_out(db, make_school, make_student):
+    import pytest
+    from fastapi import HTTPException
+
+    from config.env_config import settings
+    from src.application.auth import student as student_svc
+
+    school = make_school(code="OAK-77")
+    student = make_student(school)
+    attacker_ip = "10.0.0.1"
+    # Griefer hammers the class's SHARED code from one origin until refused.
+    for _ in range(settings.student_signin_max_attempts + 3):
+        try:
+            student_svc.sign_in(
+                db, school_or_class_code="OAK-77", qr_token=None,
+                student_id=uuid.uuid4(), client_ip=attacker_ip,
+            )
+        except HTTPException:
+            pass
+    with pytest.raises(HTTPException) as exc:
+        student_svc.sign_in(
+            db, school_or_class_code="OAK-77", qr_token=None,
+            student_id=uuid.uuid4(), client_ip=attacker_ip,
+        )
+    assert exc.value.status_code == 429  # attacker's own origin is throttled
+    # ...but a legitimate student on a DIFFERENT device/IP signs in fine with the SAME shared code:
+    # no class-wide lockout, no DoS lever.
+    ok = student_svc.sign_in(
+        db, school_or_class_code="OAK-77", qr_token=None,
+        student_id=student.id, client_ip="192.168.1.50",
+    )
+    assert ok.session_token
+
+
+def test_legit_student_success_breaks_the_failure_streak_same_ip(db, make_school, make_student):
+    import pytest
+    from fastapi import HTTPException
+
+    from config.env_config import settings
+    from src.application.auth import student as student_svc
+
+    school = make_school(code="OAK-77")
+    student = make_student(school)
+    ip = "10.0.0.9"
+    # Just BELOW the threshold: honest failures (wrong student_id -> 404) on this (ip, code).
+    for _ in range(settings.student_signin_max_attempts - 1):
+        with pytest.raises(HTTPException) as exc:
+            student_svc.sign_in(
+                db, school_or_class_code="OAK-77", qr_token=None,
+                student_id=uuid.uuid4(), client_ip=ip,
+            )
+        assert exc.value.status_code == 404
+    # The real student then signs in (200); the recorded success resets the consecutive-fail count.
+    ok = student_svc.sign_in(
+        db, school_or_class_code="OAK-77", qr_token=None,
+        student_id=student.id, client_ip=ip,
+    )
+    assert ok.session_token
+    # Because the streak reset, a fresh attempt is a normal 404 — NOT a pre-emptive 429 lockout.
+    with pytest.raises(HTTPException) as exc:
+        student_svc.sign_in(
+            db, school_or_class_code="OAK-77", qr_token=None,
+            student_id=uuid.uuid4(), client_ip=ip,
+        )
+    assert exc.value.status_code == 404
+
+
 # ---- student-session scope isolation ---------------------------------------------------------
 
 def test_student_session_scope_is_student_only(client, make_school, make_student):

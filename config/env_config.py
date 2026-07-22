@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     # account lockout
     lockout_max_attempts: int = 5
     lockout_window_minutes: int = 15
+    # student passwordless sign-in — failed-attempt escalation (FR-01-02, M1 hardening).
+    # Keyed on (client IP + presented code/token), so a bad actor hammering a class's SHARED code
+    # can only throttle its OWN origin — never lock the whole class out (no DoS lever, no permanent
+    # account lockout). A bounded cool-down window; refusal surfaces as 429 (rate-limit family).
+    student_signin_max_attempts: int = 10
+    student_signin_window_minutes: int = 15
 
     # ---- external integrations: TEST/ACTIVE dual flow (backend.md) ----
     active_env: str = "TEST"                       # TEST (local/mock) | ACTIVE (real providers)

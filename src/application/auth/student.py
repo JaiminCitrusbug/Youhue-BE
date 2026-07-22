@@ -6,7 +6,16 @@ student picks their name/avatar (`student_id`) within that class/school and is i
 short-lived, single-active-device session on the student surface (never a staff surface).
 
 Errors are surfaced per the ticket contract: 400 invalid/expired code (or bad input),
-404 student not in class/school. DB access is via domain services (backend.md layering).
+404 student not in class/school, 429 too many failed attempts. DB access is via domain services
+(backend.md layering).
+
+Abuse resistance (FR-01-02 M1): on top of the per-IP rate limiter, repeated FAILED sign-ins from
+one origin against a given code escalate to a bounded, temporary refusal (429). The counter is keyed
+on the (client IP + presented code/token) pair — NOT the shared class code alone — so a griefer can
+only throttle its own origin and can never lock a whole class out of its shared code (no DoS lever),
+and a legitimate student is never permanently locked: a success breaks the failure streak and the
+window ages failures out. Classic account-lockout is deliberately rejected here: passwordless
+sign-in has no per-student credential to brute-force, and locking the shared code would be a DoS.
 """
 import uuid
 
@@ -14,19 +23,34 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from config.env_config import settings
-from src.application.auth import sessions
+from src.application.auth import lockout, sessions
 from src.constants.enums import SessionKind
 from src.domain.auth import services as auth_db
 from src.domain.identity import services as identity_db
 from src.domain.identity.models import Student
 from src.domain.org import services as org_db
 from src.schemas.student_auth import StudentSession
+from src.utils import security
 
 _BAD_CODE = HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired code")
 _NOT_IN_CLASS = HTTPException(status.HTTP_404_NOT_FOUND, "Student not in class")
 _REPLAYED_QR = HTTPException(
     status.HTTP_400_BAD_REQUEST, "qr_token already used for an active session"
 )
+_TOO_MANY = HTTPException(
+    status.HTTP_429_TOO_MANY_REQUESTS, "Too many failed sign-in attempts, try again shortly"
+)
+# Failed attempts that count toward the escalation (bad input/code, or student-not-in-class).
+_COUNTED_FAILURES = frozenset({status.HTTP_400_BAD_REQUEST, status.HTTP_404_NOT_FOUND})
+
+
+def _attempt_key(client_ip: str | None, code: str | None, qr_token: str | None) -> str:
+    """Escalation counter identifier. Hash so the raw shared code/token is never persisted in
+    login_attempts, and bind the CLIENT IP into the key so one bad origin can only throttle itself
+    — never lock the whole class out of its shared code (DoS-safe by construction)."""
+    presented = code or qr_token or ""
+    digest = security.hash_secret(f"{client_ip or 'unknown'}|{presented}")
+    return f"student-signin:{digest}"
 
 
 def sign_in(
@@ -36,6 +60,32 @@ def sign_in(
     qr_token: str | None,
     student_id: uuid.UUID,
     device_id: str | None = None,
+    client_ip: str | None = None,
+) -> StudentSession:
+    key = _attempt_key(client_ip, school_or_class_code, qr_token)
+    if lockout.is_locked(
+        db, key, settings.student_signin_max_attempts, settings.student_signin_window_minutes
+    ):
+        raise _TOO_MANY
+    try:
+        result = _resolve_and_issue(
+            db, school_or_class_code, qr_token, student_id, device_id
+        )
+    except HTTPException as exc:
+        # Only genuine sign-in failures escalate; a success below records success and resets.
+        if exc.status_code in _COUNTED_FAILURES:
+            lockout.record_attempt(db, key, succeeded=False)
+        raise
+    lockout.record_attempt(db, key, succeeded=True)  # success breaks the consecutive-failure streak
+    return result
+
+
+def _resolve_and_issue(
+    db: Session,
+    school_or_class_code: str | None,
+    qr_token: str | None,
+    student_id: uuid.UUID,
+    device_id: str | None,
 ) -> StudentSession:
     # qr_token is single-use and MUTUALLY EXCLUSIVE with the code (ticket §Must-nots): exactly one.
     if bool(school_or_class_code) == bool(qr_token):
