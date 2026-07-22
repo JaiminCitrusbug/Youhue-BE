@@ -1,15 +1,13 @@
-"""Student read endpoint — INFRA-02 isolation demonstrator. Staff-only + school-scoped: a caller
-from another school (or a student session) is denied (403), proving cross-tenant isolation."""
-
+"""Student read endpoint — isolation + role/class scoping demonstrator (INFRA-02/03). Staff-only;
+a caller from another school, or a teacher outside the student's class, is denied (403)."""
 import uuid
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
-from src.application import isolation
-from src.domain.enums import SessionKind
+from src.application import authz, isolation
 from src.infrastructure.models.identity import Student
-from src.interfaces.deps import DbDep, SessionDep
+from src.interfaces.deps import DbDep, StaffDep
 
 router = APIRouter(prefix="/students", tags=["students"])
 
@@ -22,23 +20,17 @@ class StudentOut(BaseModel):
 
 
 @router.get("/{student_id}", response_model=StudentOut)
-def get_student(student_id: uuid.UUID, sess: SessionDep, db: DbDep) -> StudentOut:
-    if sess.kind != SessionKind.staff or sess.school_id is None:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")
-    student = isolation.get_scoped(db, Student, student_id, sess.school_id)
+def get_student(student_id: uuid.UUID, staff: StaffDep, db: DbDep) -> StudentOut:
+    student = db.get(Student, student_id)
     if student is None:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")  # cross-tenant or missing
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")  # hide existence
+    authz.require_student_access(db, staff, student)  # school + class scope -> 403
     isolation.audit(
-        db,
-        actor_id=sess.subject_id,
-        action="student.read",
-        target=str(student.id),
-        school_id=sess.school_id,
+        db, actor_id=staff.id, action="student.read",
+        target=str(student.id), school_id=staff.school_id,
     )
     db.commit()
     return StudentOut(
-        id=student.id,
-        display_name=student.display_name,
-        age_band=student.age_band.value,
-        school_id=student.school_id,
+        id=student.id, display_name=student.display_name,
+        age_band=student.age_band.value, school_id=student.school_id,
     )
