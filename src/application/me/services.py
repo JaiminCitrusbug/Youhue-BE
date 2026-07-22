@@ -12,6 +12,9 @@ def resolve_me(db: Session, sess: AuthSession) -> MeResponse:
     if sess.kind == SessionKind.staff:
         staff = identity_db.get_staff(db, sess.subject_id)
         role = staff.role.value if staff else None
+    elif sess.kind == SessionKind.admin:
+        admin = identity_db.get_admin(db, sess.subject_id)
+        role = admin.role.value if admin else None
     return MeResponse(
         subject_id=sess.subject_id, kind=sess.kind.value, school_id=sess.school_id, role=role
     )

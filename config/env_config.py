@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     staff_session_ttl_minutes: int = 720          # 12h staff working session
     student_session_ttl_minutes: int = 20         # short-lived, shared-device
+    admin_session_ttl_minutes: int = 60           # internal admin console (MFA-gated, short)
     student_single_active_device: bool = True
     # account lockout
     lockout_max_attempts: int = 5

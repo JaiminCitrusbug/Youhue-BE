@@ -17,6 +17,7 @@ from config.db_connection import Base, get_db
 from config.env_config import settings
 from main import app
 from src.constants.enums import (
+    AdminRole,
     SchoolStatus,
     StaffClassScope,
     StaffRole,
@@ -24,7 +25,7 @@ from src.constants.enums import (
     StudentAgeBand,
 )
 from src.domain import registry as models  # noqa: F401  (register tables)
-from src.domain.identity.models import School, StaffAccount, Student
+from src.domain.identity.models import InternalAdmin, School, StaffAccount, Student
 from src.domain.org.models import ClassGroup, ClassMembership, StaffClassAccess
 from src.infrastructure.middlewares.ratelimit import reset as reset_ratelimit
 from src.utils.security import hash_password
@@ -110,6 +111,22 @@ def make_staff(db: Session) -> Callable[..., StaffAccount]:
         db.commit()
         db.refresh(staff)
         return staff
+    return _make
+
+
+@pytest.fixture()
+def make_admin(db: Session) -> Callable[..., InternalAdmin]:
+    def _make(email: str = "admin@youhue.app", password: str | None = "Password123",
+              role: AdminRole = AdminRole.superadmin) -> InternalAdmin:
+        admin = InternalAdmin(
+            email=email.lower(),
+            password_hash=hash_password(password) if password else None,
+            role=role,
+        )
+        db.add(admin)
+        db.commit()
+        db.refresh(admin)
+        return admin
     return _make
 
 

@@ -5,7 +5,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.constants.enums import SchoolStatus, StaffStatus, StudentStatus
-from src.domain.identity.models import School, StaffAccount, Student
+from src.domain.identity.models import InternalAdmin, School, StaffAccount, Student
+
+
+def get_admin_by_email(db: Session, email: str) -> InternalAdmin | None:
+    """Look up a platform-level internal admin by email (admin console sign-in, FR-19-01)."""
+    return db.scalar(select(InternalAdmin).where(InternalAdmin.email == email.lower()))
+
+
+def get_admin(db: Session, admin_id: uuid.UUID) -> InternalAdmin | None:
+    return db.get(InternalAdmin, admin_id)
 
 
 def get_active_staff_by_email(db: Session, email: str) -> StaffAccount | None:

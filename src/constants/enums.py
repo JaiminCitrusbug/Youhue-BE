@@ -28,6 +28,16 @@ class StaffRole(str, enum.Enum):
     district = "district"
 
 
+class AdminRole(str, enum.Enum):
+    """Internal-team roles for the admin console (FR-19-01). Distinct from school StaffRole —
+    an InternalAdmin is a platform-level account, never school-scoped. Completes the 6-role
+    matrix (4 staff + 2 internal): a full-control superadmin and a limited support role whose
+    permission set is a strict subset (the deny-cell the RBAC probe exercises)."""
+
+    superadmin = "superadmin"  # full platform control — every admin permission
+    support = "support"        # limited internal support — subset only, no platform maintenance
+
+
 class StaffStatus(str, enum.Enum):
     invited = "invited"
     sent = "sent"

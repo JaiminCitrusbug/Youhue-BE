@@ -13,6 +13,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from config.db_connection import Base
 from src.constants.enums import (
+    AdminRole,
     AuthProvider,
     SchoolStatus,
     SchoolTier,
@@ -94,6 +95,13 @@ class InternalAdmin(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     password_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Internal-team role gates every admin-console action (FR-19-01). server_default keeps the
+    # ADD COLUMN safe on a non-empty table and defaults existing rows to the least-privilege role.
+    role: Mapped[AdminRole] = mapped_column(
+        Enum(AdminRole, name="admin_role"),
+        nullable=False,
+        server_default=AdminRole.support.value,
+    )
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
