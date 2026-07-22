@@ -16,6 +16,7 @@ from alembic.config import Config
 from config.db_connection import Base, get_db
 from config.env_config import settings
 from main import app
+from src.application.auth.single_use import reset as reset_single_use
 from src.constants.enums import (
     AdminRole,
     SchoolStatus,
@@ -69,6 +70,7 @@ def db() -> Generator[Session, None, None]:
 @pytest.fixture(autouse=True)
 def _clean() -> Generator[None, None, None]:
     reset_ratelimit()  # in-process limiter must not leak across tests
+    reset_single_use()  # in-process single-use jti registry must not leak across tests
     yield
     with _engine.begin() as conn:
         for table in reversed(Base.metadata.sorted_tables):

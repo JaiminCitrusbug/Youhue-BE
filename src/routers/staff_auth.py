@@ -16,7 +16,13 @@ from src.domain.identity import services as identity_db
 from src.infrastructure.middlewares.auth_middleware import DbDep
 from src.infrastructure.middlewares.ratelimit import rate_limit
 from src.schemas.auth import TokenResponse
-from src.schemas.staff_auth import ForgotPassword, MfaVerify, ResetPassword, StaffSignIn
+from src.schemas.staff_auth import (
+    ForgotPassword,
+    MfaVerify,
+    ResetPassword,
+    SsoLink,
+    StaffSignIn,
+)
 
 router = APIRouter(prefix="/auth/staff", tags=["staff-auth"])
 _throttle = [Depends(rate_limit)]
@@ -47,7 +53,7 @@ def forgot_password(body: ForgotPassword, db: DbDep) -> dict[str, str]:
     return {"status": "accepted"}
 
 
-@router.post("/reset-password", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/reset-password", status_code=status.HTTP_204_NO_CONTENT, dependencies=_throttle)
 def reset_password(body: ResetPassword, db: DbDep) -> Response:
     staff_svc.reset_password(db, body.token, body.new_password)
     db.commit()
@@ -85,14 +91,34 @@ def sso_callback(
     so the popup can always postMessage back (a JSON error body could not run the bridge script)."""
     sso_svc.require_enabled(provider)
     try:
-        result = sso_svc.complete_sign_in(db, provider, code, state)
+        outcome = sso_svc.complete_sign_in(db, provider, code, state)
         db.commit()
     except HTTPException as exc:
         db.rollback()
         return sso_svc.callback_bridge_response(ok=False, error=str(exc.detail))
+    if isinstance(outcome, sso_svc.LinkRequired):
+        # first-time subject matched an existing email: NO session, NO silent link — surface the
+        # single-use link token so the SPA can drive the explicit confirm step (Scenario 3).
+        return sso_svc.callback_bridge_response(
+            ok=False,
+            link_required=True,
+            link_token=outcome.link_token,
+            provider=outcome.provider,
+            email=outcome.email,
+        )
     return sso_svc.callback_bridge_response(
         ok=True,
-        access_token=result.access_token,
-        token_type=result.token_type,
-        mfa_required=result.mfa_required,
+        access_token=outcome.token.access_token,
+        token_type=outcome.token.token_type,
+        mfa_required=outcome.token.mfa_required,
     )
+
+
+@router.post("/sso/link", response_model=TokenResponse, dependencies=_throttle)
+def sso_link(body: SsoLink, db: DbDep) -> TokenResponse:
+    """Explicit confirm (Scenario 3): exchange a valid single-use ``link_token`` for a staff
+    session, binding the SSO subject to the target account. This is the consent gate — the callback
+    never links on its own."""
+    result = sso_svc.complete_link(db, body.link_token)
+    db.commit()
+    return result

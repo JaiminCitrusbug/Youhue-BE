@@ -24,3 +24,10 @@ class ResetPassword(BaseModel):
 class MfaVerify(BaseModel):
     session_token: str
     code: str
+
+
+class SsoLink(BaseModel):
+    """Body for the explicit SSO link-confirm step (Scenario 3): the short-lived single-use token
+    the callback issued when a first-time SSO email matched an existing account."""
+
+    link_token: str

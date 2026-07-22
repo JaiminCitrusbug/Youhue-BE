@@ -33,35 +33,66 @@ def test_require_same_school_denies_null_school():
     assert exc.value.status_code == 403
 
 
-def test_sso_first_match_links_existing_email(db, make_school, make_staff):
+def test_sso_email_match_returns_link_required_not_auto_link(db, make_school, make_staff):
+    # M2: a first-time subject matching an existing email is NOT silently linked; it returns a
+    # LinkRequired outcome (no DB write, no session) carrying the single-use link token.
     school = make_school()
     staff = make_staff(school, email="t@oakwood.edu")
-    resolved = sso_svc.resolve_or_link(db, subject="google-sub-1", email="t@oakwood.edu", school_id=school.id)
-    assert resolved.id == staff.id
-    assert resolved.sso_subject == "google-sub-1"
-    # subsequent SSO resolves by subject within the same school (even with a different email claim)
-    again = sso_svc.resolve_or_link(db, subject="google-sub-1", email="other@x.edu", school_id=school.id)
-    assert again.id == staff.id
+    outcome = sso_svc.resolve_or_link(
+        db, "google", "google-sub-1", "t@oakwood.edu", True, school.id
+    )
+    assert isinstance(outcome, sso_svc.LinkRequired)
+    assert outcome.link_token and outcome.email == "t@oakwood.edu"
+    db.refresh(staff)
+    assert staff.sso_subject is None  # NOT auto-linked
+
+
+def test_sso_confirm_link_binds_subject_then_resolves_by_subject(db, make_school, make_staff):
+    school = make_school()
+    staff = make_staff(school, email="t@oakwood.edu")
+    outcome = sso_svc.resolve_or_link(
+        db, "google", "google-sub-1", "t@oakwood.edu", True, school.id
+    )
+    assert isinstance(outcome, sso_svc.LinkRequired)
+    sso_svc.complete_link(db, outcome.link_token)  # explicit confirm binds the subject
+    db.refresh(staff)
+    assert staff.sso_subject == "google-sub-1"
+    # subsequent SSO now resolves by subject to a session (even with a different email claim)
+    again = sso_svc.resolve_or_link(db, "google", "google-sub-1", "other@x.edu", True, school.id)
+    assert isinstance(again, sso_svc.SessionIssued)
+
+
+def test_sso_unverified_email_cannot_link(db, make_school, make_staff):
+    # M1: an unverified (or absent email_verified) claim must not be enough to LINK.
+    school = make_school()
+    make_staff(school, email="t@oakwood.edu")
+    with pytest.raises(HTTPException) as exc:
+        sso_svc.resolve_or_link(db, "google", "sub-x", "t@oakwood.edu", False, school.id)
+    assert exc.value.status_code == 401
 
 
 def test_sso_unknown_email_denied(db, make_school):
     school = make_school()
     with pytest.raises(HTTPException) as exc:
-        sso_svc.resolve_or_link(db, subject="sub-x", email="ghost@nowhere.edu", school_id=school.id)
+        sso_svc.resolve_or_link(db, "google", "sub-x", "ghost@nowhere.edu", True, school.id)
     assert exc.value.status_code == 401
 
 
-def test_sso_does_not_resolve_across_schools(db, make_school, make_staff):
-    # Same email at two schools (unique only per school). SSO into School B must resolve/link
+def test_sso_confirm_link_does_not_resolve_across_schools(db, make_school, make_staff):
+    # Same email at two schools (unique only per school). Confirming a link into School B must bind
     # ONLY School B's account and never touch School A's (the B1 cross-tenant fix).
     school_a = make_school(code="AAA")
     school_b = make_school(code="BBB")
     staff_a = make_staff(school_a, email="dual@oakwood.edu")
     staff_b = make_staff(school_b, email="dual@oakwood.edu")
-    resolved = sso_svc.resolve_or_link(db, subject="ms-sub-9", email="dual@oakwood.edu", school_id=school_b.id)
-    assert resolved.id == staff_b.id
-    assert resolved.id != staff_a.id
+    outcome = sso_svc.resolve_or_link(
+        db, "microsoft", "ms-sub-9", "dual@oakwood.edu", True, school_b.id
+    )
+    assert isinstance(outcome, sso_svc.LinkRequired)
+    sso_svc.complete_link(db, outcome.link_token)
     db.refresh(staff_a)
+    db.refresh(staff_b)
+    assert staff_b.sso_subject == "ms-sub-9"
     assert staff_a.sso_subject is None  # School A's account untouched
 
 
