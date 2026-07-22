@@ -51,3 +51,109 @@ class SessionKind(str, enum.Enum):
     staff = "staff"
     student = "student"
     admin = "admin"
+
+
+# ---- remaining §13.4 / attribute enums (INFRA-02) ----
+class StaffClassScope(str, enum.Enum):
+    owner = "owner"
+    shared = "shared"
+
+
+class InvitationStatus(str, enum.Enum):
+    invited = "invited"
+    sent = "sent"
+    accepted = "accepted"
+    revoked = "revoked"
+    expired = "expired"
+
+
+class ActivityScope(str, enum.Enum):
+    seed = "seed"
+    school = "school"
+
+
+class ActivityType(str, enum.Enum):
+    breathing = "breathing"
+    grounding = "grounding"
+    stretch = "stretch"
+    brain_break = "brain_break"
+
+
+class ActivityAgeBand(str, enum.Enum):
+    b5_7 = "b5_7"
+    b8_11 = "b8_11"
+    b12_18 = "b12_18"
+    all = "all"
+
+
+class ActivityEngagementStatus(str, enum.Enum):
+    offered = "offered"
+    started = "started"
+    completed = "completed"
+
+
+class FlagType(str, enum.Enum):
+    concern_word = "concern_word"
+    slow_burn = "slow_burn"
+
+
+class FlagBand(str, enum.Enum):
+    immediate = "immediate"
+    triage = "triage"
+    none = "none"
+
+
+class FlagStatus(str, enum.Enum):
+    open = "open"
+    acknowledged = "acknowledged"
+    escalated = "escalated"
+    actioned = "actioned"
+    closed = "closed"
+
+
+class AlertChannel(str, enum.Enum):
+    email = "email"
+    in_app = "in_app"
+
+
+class DeliveryStatus(str, enum.Enum):
+    queued = "queued"
+    sent = "sent"
+    delivered = "delivered"
+    failed = "failed"
+    retrying = "retrying"
+
+
+class FlagEventType(str, enum.Enum):
+    alerted = "alerted"
+    viewed = "viewed"
+    acted = "acted"
+    escalated = "escalated"
+
+
+class SubscriptionTier(str, enum.Enum):
+    free = "free"
+    premium = "premium"
+
+
+class SubscriptionState(str, enum.Enum):
+    trial = "trial"
+    active = "active"
+    free = "free"
+    cancelled = "cancelled"
+
+
+class ParentalConsentStatus(str, enum.Enum):
+    pending = "pending"
+    verified = "verified"
+
+
+class DataExportKind(str, enum.Enum):
+    export = "export"
+    export_and_delete = "export_and_delete"
+
+
+class DataExportStatus(str, enum.Enum):
+    pending = "pending"
+    ready = "ready"
+    completed = "completed"
