@@ -1,17 +1,13 @@
-"""Auth endpoints (INFRA-01). Two surfaces (student/staff); a student session never resolves
-a staff route. Sign-in errors are generic; forgot-password is 202 with no disclosure.
-Sign-in / OTP / forgot are rate-limited (see ratelimit.py)."""
-import uuid
-
+"""Auth endpoints (INFRA-01). Two surfaces (student/staff); a student session never resolves a
+staff route. Sign-in errors are generic; forgot-password is 202. Sign-in/OTP/forgot are throttled.
+Thin router — business logic lives in src.application.*"""
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
-from config.env_config import settings
 from src.application.auth import sessions
 from src.application.auth import sso as sso_svc
 from src.application.auth import staff as staff_svc
 from src.application.auth import student as student_svc
-from src.constants.enums import SessionKind
-from src.domain.identity.models import StaffAccount
+from src.application.me import services as me_svc
 from src.infrastructure.middlewares.auth_middleware import AnySessionDep, DbDep, SessionDep
 from src.infrastructure.middlewares.ratelimit import rate_limit
 from src.schemas.auth import (
@@ -23,7 +19,6 @@ from src.schemas.auth import (
     StudentSignIn,
     TokenResponse,
 )
-from src.utils.security import decode_jwt
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 _throttle = [Depends(rate_limit)]
@@ -39,23 +34,12 @@ def staff_sign_in(body: StaffSignIn, db: DbDep) -> TokenResponse:
 @router.post("/staff/mfa/verify", response_model=TokenResponse, dependencies=_throttle)
 def staff_mfa_verify(body: MfaVerify, db: DbDep) -> TokenResponse:
     try:
-        payload = decode_jwt(body.session_token)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token") from exc
-    jti = payload.get("jti")
-    try:
-        sess = sessions.get_active_session(db, uuid.UUID(str(jti))) if jti else None
-    except (ValueError, TypeError):
-        sess = None
-    if sess is None or not sess.mfa_pending:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "No pending MFA")
-    if not staff_svc.verify_mfa(db, sess.subject_id, body.code):
-        db.commit()  # persist the failed-attempt record (brute-force cap)
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid code")
-    sessions.promote_after_mfa(db, sess, settings.staff_session_ttl_minutes)
-    token = sessions.issue_token(sess)
+        result = staff_svc.verify_mfa_and_promote(db, body.session_token, body.code)
+    except HTTPException:
+        db.commit()  # persist any failed-attempt record (brute-force cap)
+        raise
     db.commit()
-    return TokenResponse(access_token=token)
+    return result
 
 
 @router.post("/student/sign-in", response_model=TokenResponse, dependencies=_throttle)
@@ -82,7 +66,6 @@ def reset_password(body: ResetPassword, db: DbDep) -> Response:
 @router.get("/staff/sso/{provider}")
 def sso_start(provider: str) -> dict[str, str]:
     sso_svc.require_enabled(provider)
-    # Configured-provider authorize redirect is wired via Authlib; unconfigured -> 501 above.
     return {"provider": provider, "status": "configured"}  # pragma: no cover
 
 
@@ -98,10 +81,4 @@ me_router = APIRouter(tags=["auth"])
 
 @me_router.get("/me", response_model=MeResponse)
 def me(sess: SessionDep, db: DbDep) -> MeResponse:
-    role: str | None = None
-    if sess.kind == SessionKind.staff:
-        staff = db.get(StaffAccount, sess.subject_id)
-        role = staff.role.value if staff else None
-    return MeResponse(
-        subject_id=sess.subject_id, kind=sess.kind.value, school_id=sess.school_id, role=role
-    )
+    return me_svc.resolve_me(db, sess)

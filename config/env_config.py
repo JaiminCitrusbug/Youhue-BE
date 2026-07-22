@@ -2,9 +2,9 @@
 
 Pydantic v2 settings; every value is env-overridable (12-factor). Secrets never hard-coded:
 JWT_SECRET falls back to a per-process random dev value, real value comes from env in any
-deployed environment. Adapters (email, SSO, DB) are selected by env, per owner decisions:
-  - EMAIL_BACKEND=file  -> writes .eml to EMAIL_FILE_DIR (local dev)
-  - EMAIL_BACKEND=sendgrid -> SendGrid API (active env; needs SENDGRID_API_KEY)
+deployed environment. External integrations use the ACTIVE_ENV TEST/ACTIVE dual-flow (backend.md):
+  - ACTIVE_ENV=TEST   -> email writes .eml to EMAIL_FILE_DIR (local sink, no keys)
+  - ACTIVE_ENV=ACTIVE -> email via SendGrid (needs SENDGRID_API_KEY)
   - MFA = email OTP only (leadership/district/admin)
   - Risk thresholds + default concern words are env-driven (D-05/D-18 pending ratification)
 """

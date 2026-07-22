@@ -15,7 +15,8 @@ class SchoolTier(str, enum.Enum):
 
 
 class AuthProvider(str, enum.Enum):
-    password = "password"  # noqa: S105  (enum value, not a secret)
+    # 'password' is an auth-provider name, not a credential.
+    password = "password"  # noqa: S105  # nosec B105
     google = "google"
     microsoft = "microsoft"
 

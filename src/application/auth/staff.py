@@ -77,6 +77,25 @@ def verify_mfa(db: Session, subject_id: uuid.UUID, code: str) -> bool:
     return True
 
 
+def verify_mfa_and_promote(db: Session, session_token: str, code: str) -> TokenResponse:
+    """Resolve the pending-MFA session from its token, verify the OTP, promote to a full session."""
+    try:
+        payload = security.decode_jwt(session_token)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token") from exc
+    jti = payload.get("jti")
+    try:
+        sess = sessions.get_active_session(db, uuid.UUID(str(jti))) if jti else None
+    except (ValueError, TypeError):
+        sess = None
+    if sess is None or not sess.mfa_pending:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "No pending MFA")
+    if not verify_mfa(db, sess.subject_id, code):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid code")
+    sessions.promote_after_mfa(db, sess, settings.staff_session_ttl_minutes)
+    return TokenResponse(access_token=sessions.issue_token(sess))
+
+
 def forgot_password(db: Session, email: str) -> None:
     """Always succeeds to the caller (202). Only a real password account gets a reset link."""
     staff = identity_db.get_active_staff_by_email(db, email)
