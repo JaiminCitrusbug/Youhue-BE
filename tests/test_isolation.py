@@ -31,6 +31,7 @@ def test_staff_reads_own_class_student(client, make_school, make_staff, make_stu
     assert r.json()["display_name"] == "Amy"
 
 
+@pytest.mark.authz
 def test_cross_tenant_read_denied(client, make_school, make_staff, make_student):
     school_a = make_school(code="A")
     make_staff(school_a, email="a@oakwood.edu")
@@ -41,6 +42,7 @@ def test_cross_tenant_read_denied(client, make_school, make_staff, make_student)
     assert r.status_code == 403
 
 
+@pytest.mark.authz
 def test_teacher_denied_same_school_other_class_over_http(
     client, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class
 ):
@@ -57,6 +59,7 @@ def test_teacher_denied_same_school_other_class_over_http(
     assert r.status_code == 403
 
 
+@pytest.mark.authz
 def test_student_session_cannot_read_student_records(client, make_school, make_student):
     school = make_school(code="A")
     student = make_student(school)

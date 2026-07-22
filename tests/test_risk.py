@@ -3,6 +3,8 @@ student action), idempotent + dead-lettering worker, and the school-scoped /risk
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from config.env_config import settings
 from src.application.derived import services as derived
 from src.application.risk import services as risk
@@ -246,6 +248,7 @@ def test_score_endpoint_flags_and_is_idempotent(client, db, make_school, make_st
     assert db.query(Flag).count() == 1  # idempotent — no duplicate flag on a second call
 
 
+@pytest.mark.authz
 def test_score_endpoint_rejects_cross_school(client, db, make_school, make_staff, make_student):
     school_a = make_school(code="AAA-1", name="A")
     make_staff(school_a, email="a@oakwood.edu")
@@ -269,6 +272,7 @@ def test_score_endpoint_unknown_checkin_404(client, make_school, make_staff):
     assert r.status_code == 404
 
 
+@pytest.mark.authz
 def test_score_endpoint_denies_student_session(client, db, make_school, make_student):
     # scoring is internal/staff — a student session must not score (would expose a peer's terms)
     school = make_school(code="OAK-9")

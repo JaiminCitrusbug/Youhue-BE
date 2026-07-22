@@ -40,6 +40,7 @@ def test_leadership_sees_whole_school(db, make_school, make_staff, make_student)
     assert authz.can_access_student(db, lead, make_student(school)) is True  # no class needed
 
 
+@pytest.mark.authz
 def test_cross_school_never(db, make_school, make_staff, make_student):
     lead_a = make_staff(make_school(code="A"), email="l@oakwood.edu", role=StaffRole.leadership)
     student_b = make_student(make_school(code="B"))
@@ -66,6 +67,7 @@ def test_role_requires_mfa_helper():
     assert authz.role_requires_mfa(StaffRole.teacher) is False
 
 
+@pytest.mark.authz
 def test_district_denied_student_level(db, make_school, make_staff, make_student):
     # SRS §8: district sees aggregates only — never a student-level row (review B1 fix)
     school = make_school()
@@ -73,6 +75,7 @@ def test_district_denied_student_level(db, make_school, make_staff, make_student
     assert authz.can_access_student(db, district, make_student(school)) is False
 
 
+@pytest.mark.authz
 def test_support_limited_to_shared_class_only(
     db, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class
 ):
