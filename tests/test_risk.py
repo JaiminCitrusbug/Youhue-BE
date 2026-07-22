@@ -267,3 +267,15 @@ def test_score_endpoint_unknown_checkin_404(client, make_school, make_staff):
         headers=_auth(_staff_token(client)),
     )
     assert r.status_code == 404
+
+
+def test_score_endpoint_denies_student_session(client, db, make_school, make_student):
+    # scoring is internal/staff — a student session must not score (would expose a peer's terms)
+    school = make_school(code="OAK-9")
+    student = make_student(school)
+    c = _mk_checkin(db, student, school, reflection="i feel unsafe")
+    token = client.post(
+        "/api/v1/auth/student/sign-in", json={"school_code": "OAK-9", "student_id": str(student.id)}
+    ).json()["access_token"]
+    r = client.post("/api/v1/risk/score", json={"checkin_id": str(c.id)}, headers=_auth(token))
+    assert r.status_code == 403

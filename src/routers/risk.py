@@ -6,6 +6,7 @@ import logging
 from fastapi import APIRouter, HTTPException, status
 
 from src.application.risk import services as risk_svc
+from src.constants.enums import SessionKind
 from src.domain.checkin import services as checkin_db
 from src.infrastructure.middlewares.auth_middleware import DbDep, SessionDep, require_same_school
 from src.schemas.risk import ScoreRequest, ScoreResponse
@@ -16,11 +17,15 @@ router = APIRouter(prefix="/risk", tags=["risk"])
 
 @router.post("/score", response_model=ScoreResponse)
 def score(body: ScoreRequest, sess: SessionDep, db: DbDep) -> ScoreResponse:
+    # Internal/staff surface — a student session never scores (would expose a peer's matched terms).
+    if sess.kind != SessionKind.staff:
+        logger.warning("fr_12_01_forbidden reason=non_staff kind=%s", sess.kind.value)
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Staff session required")
     checkin = checkin_db.get_checkin(db, body.checkin_id)
     if checkin is None:
         logger.info("fr_12_01_rejected checkin=%s reason=not_found", body.checkin_id)
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Check-in not found")
-    try:  # the single cross-tenant guard — a session never scores another school's check-in
+    try:  # the single cross-tenant guard — a staff session never scores another school's check-in
         require_same_school(sess, checkin.school_id)
     except HTTPException:
         logger.warning("fr_12_01_forbidden checkin=%s", body.checkin_id)
