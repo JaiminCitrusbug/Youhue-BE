@@ -2,8 +2,8 @@
 import pytest
 from fastapi import HTTPException
 
-from src.application import authz
-from src.domain.enums import StaffRole
+from src.application.authz import services as authz
+from src.constants.enums import StaffRole
 
 SIGNIN = "/api/v1/auth/staff/sign-in"
 

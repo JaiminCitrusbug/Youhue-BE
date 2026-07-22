@@ -1,39 +1,31 @@
-"""Staff auth: email/password sign-in, email-OTP MFA, single-use expiring password reset.
+"""Staff auth business logic: sign-in, email-OTP MFA, single-use expiring reset.
 
 Generic errors only — a sign-in failure never reveals whether an email is registered (401);
-forgot-password always returns success (202) with no account-existence disclosure.
+forgot-password always returns success (202). All DB access is via domain services.
 """
 import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.application.auth import lockout, security, sessions
-from src.application.auth.schemas import TokenResponse
-from src.config import settings
-from src.domain.enums import SessionKind, StaffStatus
-from src.infrastructure.email import send_email
-from src.infrastructure.models.auth import MfaOtp, PasswordResetToken
-from src.infrastructure.models.identity import StaffAccount
+from config.env_config import settings
+from src.application.auth import lockout, sessions
+from src.constants.enums import SessionKind
+from src.domain.auth import services as auth_db
+from src.domain.identity import services as identity_db
+from src.infrastructure.emailer import send_email
+from src.schemas.auth import TokenResponse
+from src.utils import security
 
 _GENERIC_401 = HTTPException(status.HTTP_401_UNAUTHORIZED, "Sign-in failed")
-
-
-def _find_active_staff_by_email(db: Session, email: str) -> StaffAccount | None:
-    return db.scalar(
-        select(StaffAccount).where(
-            StaffAccount.email == email.lower(), StaffAccount.status == StaffStatus.active
-        )
-    )
 
 
 def sign_in(db: Session, email: str, password: str, device_id: str | None = None) -> TokenResponse:
     ident = email.lower()
     if lockout.is_locked(db, ident):
         raise HTTPException(status.HTTP_423_LOCKED, "Account temporarily locked")
-    staff = _find_active_staff_by_email(db, ident)
+    staff = identity_db.get_active_staff_by_email(db, ident)
     # Always run bcrypt (dummy hash if no password account) -> constant time, no user-enumeration.
     target_hash = (
         staff.password_hash if staff and staff.password_hash else security.DUMMY_PASSWORD_HASH
@@ -61,14 +53,10 @@ def sign_in(db: Session, email: str, password: str, device_id: str | None = None
 
 def _issue_mfa_otp(db: Session, subject_id: uuid.UUID, email: str) -> None:
     code = security.new_numeric_code(settings.mfa_otp_length)
-    db.add(
-        MfaOtp(
-            subject_id=subject_id,
-            code_hash=security.hash_secret(code),
-            expires_at=datetime.now(UTC) + timedelta(minutes=settings.mfa_otp_ttl_minutes),
-        )
+    auth_db.add_otp(
+        db, subject_id, security.hash_secret(code),
+        datetime.now(UTC) + timedelta(minutes=settings.mfa_otp_ttl_minutes),
     )
-    db.flush()
     send_email(email, "Your Youhue verification code", f"Your verification code is {code}")
 
 
@@ -76,12 +64,7 @@ def verify_mfa(db: Session, subject_id: uuid.UUID, code: str) -> bool:
     mfa_ident = f"mfa:{subject_id}"
     if lockout.is_locked(db, mfa_ident, settings.mfa_max_attempts):
         return False  # too many wrong OTP guesses -> brute-force cap
-    stmt = (
-        select(MfaOtp)
-        .where(MfaOtp.subject_id == subject_id, MfaOtp.consumed_at.is_(None))
-        .order_by(MfaOtp.expires_at.desc())
-    )
-    otp = db.scalar(stmt)
+    otp = auth_db.latest_unconsumed_otp(db, subject_id)
     if (
         otp is None
         or otp.expires_at <= datetime.now(UTC)
@@ -89,43 +72,30 @@ def verify_mfa(db: Session, subject_id: uuid.UUID, code: str) -> bool:
     ):
         lockout.record_attempt(db, mfa_ident, succeeded=False)
         return False
-    otp.consumed_at = datetime.now(UTC)
+    auth_db.consume_otp(db, otp)
     lockout.record_attempt(db, mfa_ident, succeeded=True)
-    db.flush()
     return True
 
 
 def forgot_password(db: Session, email: str) -> None:
     """Always succeeds to the caller (202). Only a real password account gets a reset link."""
-    staff = _find_active_staff_by_email(db, email)
+    staff = identity_db.get_active_staff_by_email(db, email)
     if staff is None or staff.password_hash is None:
         return  # SSO-only or unknown email -> no disclosure, no email
     raw = security.new_url_token()
-    db.add(
-        PasswordResetToken(
-            staff_id=staff.id,
-            token_hash=security.hash_secret(raw),
-            expires_at=datetime.now(UTC) + timedelta(hours=1),
-        )
+    auth_db.add_reset_token(
+        db, staff.id, security.hash_secret(raw), datetime.now(UTC) + timedelta(hours=1)
     )
-    db.flush()
     link = f"{settings.frontend_base_url}/reset-password?token={raw}"
     send_email(staff.email, "Reset your Youhue password", f"Reset link: {link}")
 
 
 def reset_password(db: Session, token: str, new_password: str) -> None:
-    row = db.scalar(
-        select(PasswordResetToken).where(
-            PasswordResetToken.token_hash == security.hash_secret(token),
-            PasswordResetToken.consumed_at.is_(None),
-        )
-    )
+    row = auth_db.get_unconsumed_reset_token(db, security.hash_secret(token))
     if row is None or row.expires_at <= datetime.now(UTC):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired reset token")
-    staff = db.get(StaffAccount, row.staff_id)
+    staff = identity_db.get_staff(db, row.staff_id)
     if staff is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired reset token")
-    staff.password_hash = security.hash_password(new_password)
-    row.consumed_at = datetime.now(UTC)
+    auth_db.consume_reset_and_set_password(db, row, staff, security.hash_password(new_password))
     sessions.revoke_all_for_subject(db, staff.id)  # revoke-on-password-change
-    db.flush()

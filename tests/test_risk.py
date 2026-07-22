@@ -2,12 +2,13 @@
 and the thesis — the pipeline surfaces signal and NEVER acts on a student."""
 from datetime import UTC, datetime, timedelta
 
-from src.application import derived, risk
-from src.config import settings
-from src.domain.enums import FlagBand, FlagType
-from src.infrastructure.models.billing import Notification
-from src.infrastructure.models.checkin import CheckIn
-from src.infrastructure.models.risk import ConcernWordList, Flag
+from config.env_config import settings
+from src.application.derived import services as derived
+from src.application.risk import services as risk
+from src.constants.enums import FlagBand, FlagType
+from src.domain.billing.models import Notification
+from src.domain.checkin.models import CheckIn
+from src.domain.risk.models import ConcernWordList, Flag
 
 
 def _mk_checkin(db, student, school, mood=3, reflection=None, when=None):
@@ -144,7 +145,7 @@ def test_empty_school_wordlist_opts_out(db, make_school, make_student):
 
 
 def test_scoring_error_dead_letters_without_poisoning_batch(db, make_school, make_student, monkeypatch):
-    import src.application.risk as risk_mod
+    import src.application.risk.services as risk_mod
     school = make_school()
     student = make_student(school)
     bad = _mk_checkin(db, student, school, reflection="i feel unsafe")

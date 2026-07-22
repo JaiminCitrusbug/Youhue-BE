@@ -1,5 +1,5 @@
 """Logout / token revocation, /me identity, invalid-token rejection (INFRA-01)."""
-from src.domain.enums import StaffRole
+from src.constants.enums import StaffRole
 
 SIGNIN = "/api/v1/auth/staff/sign-in"
 

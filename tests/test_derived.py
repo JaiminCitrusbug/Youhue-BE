@@ -1,7 +1,7 @@
 """INFRA-02 derived-value registry: single-owner contract + render-not-recompute (oracle)."""
 import pytest
 
-from src.application import derived
+from src.application.derived import services as derived
 
 
 def test_single_owner_enforced():

@@ -1,6 +1,6 @@
 """Staff sign-in, generic errors, forgot/reset, and email-OTP MFA (INFRA-01 / FR-01-*)."""
 import src.application.auth.staff as staff_mod
-from src.domain.enums import StaffRole
+from src.constants.enums import StaffRole
 
 SIGNIN = "/api/v1/auth/staff/sign-in"
 

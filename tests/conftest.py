@@ -10,21 +10,21 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from src.application.auth.security import hash_password
-from src.config import settings
-from src.domain.enums import (
+from config.db_connection import Base, get_db
+from config.env_config import settings
+from main import app
+from src.constants.enums import (
     SchoolStatus,
     StaffClassScope,
     StaffRole,
     StaffStatus,
     StudentAgeBand,
 )
-from src.infrastructure import models  # noqa: F401  (register tables)
-from src.infrastructure.db import Base, get_db
-from src.infrastructure.models.identity import School, StaffAccount, Student
-from src.infrastructure.models.org import ClassGroup, ClassMembership, StaffClassAccess
-from src.interfaces.ratelimit import reset as reset_ratelimit
-from src.main import app
+from src.domain import registry as models  # noqa: F401  (register tables)
+from src.domain.identity.models import School, StaffAccount, Student
+from src.domain.org.models import ClassGroup, ClassMembership, StaffClassAccess
+from src.infrastructure.middlewares.ratelimit import reset as reset_ratelimit
+from src.utils.security import hash_password
 
 _engine = create_engine(settings.database_url_test, future=True)
 _TestSession = sessionmaker(bind=_engine, autoflush=False, expire_on_commit=False)

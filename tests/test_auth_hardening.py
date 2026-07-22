@@ -3,9 +3,9 @@ expired reset token, and rate limiting."""
 from datetime import UTC, datetime, timedelta
 
 import src.application.auth.staff as staff_mod
-from src.config import settings
-from src.domain.enums import StaffRole
-from src.infrastructure.models.auth import PasswordResetToken
+from config.env_config import settings
+from src.constants.enums import StaffRole
+from src.domain.auth.models import PasswordResetToken
 
 SIGNIN = "/api/v1/auth/staff/sign-in"
 

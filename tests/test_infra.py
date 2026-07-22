@@ -1,7 +1,7 @@
 """Infra coverage: real file-email backend + the get_db dependency."""
-from src.config import settings
-from src.infrastructure.db import get_db
-from src.infrastructure.email import send_email
+from config.db_connection import get_db
+from config.env_config import settings
+from src.infrastructure.emailer import send_email
 
 
 def test_file_email_backend_writes_eml(tmp_path, monkeypatch):

@@ -8,14 +8,14 @@ requires-python = ">=3.12"
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
-addopts = "--cov=src --cov-report=term-missing --cov-fail-under=80"
+addopts = "--cov=src --cov=config --cov=main --cov-report=term-missing --cov-fail-under=80"
 
 [tool.coverage.run]
-source = ["src"]
+source = ["src", "config", "main"]
 
 [tool.ruff]
 line-length = 100
-src = ["src", "tests"]
+src = ["src", "tests", "config", "."]
 extend-exclude = ["alembic"]
 
 [tool.ruff.lint]
@@ -25,9 +25,9 @@ select = ["E", "F", "I", "B", "UP", "S"]
 "tests/*" = ["S101", "E501", "S105", "S106", "S107"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["src"]
+known-first-party = ["src", "config", "main"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src"]
+files = ["src", "config", "main.py"]

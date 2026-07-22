@@ -6,9 +6,9 @@ import pytest
 from fastapi import HTTPException
 
 from src.application.auth import sso as sso_svc
-from src.domain.enums import SessionKind
-from src.infrastructure.models.auth import AuthSession
-from src.interfaces.deps import get_current_staff, require_same_school
+from src.constants.enums import SessionKind
+from src.domain.auth.models import AuthSession
+from src.infrastructure.middlewares.auth_middleware import get_current_staff, require_same_school
 
 
 class _FakeSession:

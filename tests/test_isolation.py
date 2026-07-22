@@ -4,9 +4,9 @@ import uuid
 import pytest
 from sqlalchemy.exc import DatabaseError
 
-from src.application import isolation
-from src.infrastructure.models.compliance import AuditLog
-from src.infrastructure.models.identity import Student
+from src.application.isolation import services as isolation
+from src.domain.compliance.models import AuditLog
+from src.domain.identity.models import Student
 
 SIGNIN = "/api/v1/auth/staff/sign-in"
 
@@ -87,7 +87,7 @@ def test_audit_log_is_immutable(db):
 
 
 def test_get_scoped_via_student_isolates(db, make_school, make_staff, make_student):
-    from src.infrastructure.models.risk import SupportiveNote
+    from src.domain.risk.models import SupportiveNote
     school_a = make_school(code="A")
     school_b = make_school(code="B")
     student_b = make_student(school_b)

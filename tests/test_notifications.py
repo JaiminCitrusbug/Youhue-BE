@@ -1,8 +1,8 @@
 """INFRA-05 notification transport: dual-channel, retry+surface (no silent loss), feed, idempotency."""
-import src.application.notifications as notif_mod
-from src.application import notifications as notif
-from src.domain.enums import AlertChannel, DeliveryStatus
-from src.infrastructure.models.billing import Notification
+import src.application.notifications.services as notif_mod
+from src.application.notifications import services as notif
+from src.constants.enums import AlertChannel, DeliveryStatus
+from src.domain.billing.models import Notification
 
 SIGNIN = "/api/v1/auth/staff/sign-in"
 
@@ -100,7 +100,7 @@ def test_feed_returns_only_own_in_app(client, db, make_school, make_staff):
 
 
 def test_delivery_webhook_requires_secret(client, db, make_school, make_staff, monkeypatch):
-    from src.config import settings
+    from config.env_config import settings
     recipient = make_staff(make_school(), email="r@oakwood.edu")
     rows = notif.enqueue(db, recipient_id=recipient.id, ntype="t", payload=None)
     db.commit()

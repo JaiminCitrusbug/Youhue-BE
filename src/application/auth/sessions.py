@@ -1,17 +1,17 @@
-"""DB-backed session store: issuance, JWT, validation, revocation, single-active-device.
+"""Session application service: JWT issuance + session lifecycle business rules.
 
-Postgres-only (owner decision). The session row is the revocation authority; the JWT carries its id.
+All persistence is delegated to src.domain.auth.services (domain owns DB access).
 """
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
-from sqlalchemy import update
 from sqlalchemy.orm import Session
 
-from src.application.auth.security import encode_jwt
-from src.config import settings
-from src.domain.enums import SessionKind
-from src.infrastructure.models.auth import AuthSession
+from config.env_config import settings
+from src.constants.enums import SessionKind
+from src.domain.auth import services as auth_db
+from src.domain.auth.models import AuthSession
+from src.utils.security import encode_jwt
 
 
 def _utcnow() -> datetime:
@@ -28,19 +28,16 @@ def create_session(
     mfa_pending: bool = False,
 ) -> AuthSession:
     if kind == SessionKind.student and settings.student_single_active_device:
-        # single active device: a new student sign-in ends any prior active student session
-        revoke_all_for_subject(db, subject_id)
-    sess = AuthSession(
+        auth_db.revoke_all_sessions_for_subject(db, subject_id)  # single active device
+    return auth_db.create_session_row(
+        db,
         subject_id=subject_id,
         kind=kind,
+        ttl_minutes=ttl_minutes,
         school_id=school_id,
         device_id=device_id,
         mfa_pending=mfa_pending,
-        expires_at=_utcnow() + timedelta(minutes=ttl_minutes),
     )
-    db.add(sess)
-    db.flush()
-    return sess
 
 
 def issue_token(sess: AuthSession) -> str:
@@ -55,29 +52,19 @@ def issue_token(sess: AuthSession) -> str:
 
 
 def get_active_session(db: Session, jti: uuid.UUID) -> AuthSession | None:
-    sess = db.get(AuthSession, jti)
+    sess = auth_db.get_session(db, jti)
     if sess is None or sess.revoked_at is not None or sess.expires_at <= _utcnow():
         return None
     return sess
 
 
 def revoke_session(db: Session, jti: uuid.UUID) -> None:
-    sess = db.get(AuthSession, jti)
-    if sess is not None and sess.revoked_at is None:
-        sess.revoked_at = _utcnow()
-        db.flush()
+    auth_db.revoke_session_row(db, jti)
 
 
 def revoke_all_for_subject(db: Session, subject_id: uuid.UUID) -> None:
-    db.execute(
-        update(AuthSession)
-        .where(AuthSession.subject_id == subject_id, AuthSession.revoked_at.is_(None))
-        .values(revoked_at=_utcnow())
-    )
-    db.flush()
+    auth_db.revoke_all_sessions_for_subject(db, subject_id)
 
 
 def promote_after_mfa(db: Session, sess: AuthSession, ttl_minutes: int) -> None:
-    sess.mfa_pending = False
-    sess.expires_at = _utcnow() + timedelta(minutes=ttl_minutes)
-    db.flush()
+    auth_db.promote_session(db, sess, ttl_minutes)

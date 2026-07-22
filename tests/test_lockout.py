@@ -1,5 +1,5 @@
 """Account lockout after N consecutive failures (INFRA-01 / FR-01-08 -> 423)."""
-from src.config import settings
+from config.env_config import settings
 
 SIGNIN = "/api/v1/auth/staff/sign-in"
 

@@ -1,18 +1,15 @@
-"""Staff SSO (Google/Microsoft OAuth2/OIDC). A provider is live only when its creds are present.
-
-`resolve_or_link` is the testable core: an SSO identity resolves to an existing StaffAccount,
-and the first SSO matching an existing email links (both methods then resolve to one identity).
-The HTTP authorize/callback dance uses Authlib and is exercised only when creds are configured.
+"""Staff SSO (Google/Microsoft OAuth2/OIDC) business logic. A provider is live only when its creds
+are present. `resolve_or_link` resolves an SSO identity to a StaffAccount WITHIN the signing-in
+school, linking on first match to an existing email. DB access via domain services.
 """
 import uuid
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.config import settings
-from src.domain.enums import StaffStatus
-from src.infrastructure.models.identity import StaffAccount
+from config.env_config import settings
+from src.domain.identity import services as identity_db
+from src.domain.identity.models import StaffAccount
 
 PROVIDERS = ("google", "microsoft")
 
@@ -26,28 +23,15 @@ def is_enabled(provider: str) -> bool:
 
 
 def resolve_or_link(db: Session, subject: str, email: str, school_id: uuid.UUID) -> StaffAccount:
-    """Resolve an SSO identity to a StaffAccount WITHIN the signing-in school, linking on first
-    match to an existing email. Email is unique per school, so every lookup is school-scoped —
-    an SSO identity can never resolve to (or link) an account in a different tenant.
-    """
-    staff = db.scalar(
-        select(StaffAccount).where(
-            StaffAccount.sso_subject == subject, StaffAccount.school_id == school_id
-        )
-    )
+    """Email is unique per school, so every lookup is school-scoped — an SSO identity can never
+    resolve to (or link) an account in a different tenant."""
+    staff = identity_db.get_staff_by_sso_subject(db, subject, school_id)
     if staff is not None:
         return staff
-    staff = db.scalar(
-        select(StaffAccount).where(
-            StaffAccount.email == email.lower(),
-            StaffAccount.school_id == school_id,
-            StaffAccount.status == StaffStatus.active,
-        )
-    )
+    staff = identity_db.get_active_staff_by_email_in_school(db, email, school_id)
     if staff is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Sign-in failed")
-    staff.sso_subject = subject  # link — password sign-in (if any) still works
-    db.flush()
+    identity_db.link_sso_subject(db, staff, subject)  # link — password sign-in (if any) still works
     return staff
 
 

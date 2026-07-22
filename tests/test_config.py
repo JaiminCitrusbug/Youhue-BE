@@ -1,5 +1,5 @@
 """Settings load + env-contract sanity (adapters/thresholds are env-driven)."""
-from src.config import Settings
+from config.env_config import Settings
 
 
 def test_settings_load_with_defaults() -> None:
