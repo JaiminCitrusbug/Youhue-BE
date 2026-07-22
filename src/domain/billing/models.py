@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from config.db_connection import Base
-from src.constants.enums import AlertChannel, DeliveryStatus, SubscriptionState, SubscriptionTier
+from src.constants.enums import SubscriptionState, SubscriptionTier
 
 
 class Subscription(Base):
@@ -36,6 +36,8 @@ class Subscription(Base):
 
 
 class Notification(Base):
+    """The MESSAGE only (INFRA-05). Per-channel delivery state lives on AlertDelivery."""
+
     __tablename__ = "notifications"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -44,13 +46,6 @@ class Notification(Base):
     )
     type: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    channel: Mapped[AlertChannel] = mapped_column(
-        Enum(AlertChannel, name="alert_channel"), nullable=False
-    )
-    delivery_status: Mapped[DeliveryStatus] = mapped_column(
-        Enum(DeliveryStatus, name="delivery_status"), nullable=False, default=DeliveryStatus.queued
-    )
-    attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

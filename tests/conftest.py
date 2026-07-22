@@ -4,12 +4,15 @@ The FastAPI `get_db` dependency is overridden to share the test session so endpo
 test assertions see the same data.
 """
 from collections.abc import Callable, Generator
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from alembic import command
+from alembic.config import Config
 from config.db_connection import Base, get_db
 from config.env_config import settings
 from main import app
@@ -28,19 +31,28 @@ from src.utils.security import hash_password
 
 _engine = create_engine(settings.database_url_test, future=True)
 _TestSession = sessionmaker(bind=_engine, autoflush=False, expire_on_commit=False)
+_ALEMBIC_INI = str(Path(__file__).resolve().parents[1] / "alembic.ini")
+
+
+def _reset_schema() -> None:
+    """Drop everything so the migration chain rebuilds the schema from a clean slate."""
+    Base.metadata.drop_all(_engine)
+    with _engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        conn.execute(text("DROP FUNCTION IF EXISTS youhue_block_mutation() CASCADE"))
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _schema() -> Generator[None, None, None]:
-    Base.metadata.drop_all(_engine)
-    Base.metadata.create_all(_engine)
-    from src.infrastructure.ddl import BLOCK_FN, trigger_sql
-    with _engine.begin() as conn:  # append-only triggers (dev/prod get them via migration)
-        conn.execute(text(BLOCK_FN))  # text() so SQLAlchemy escapes % for psycopg
-        conn.execute(text(trigger_sql("audit_logs")))
-        conn.execute(text(trigger_sql("flag_events")))
+    # Build the test schema by running the REAL Alembic migration chain (not create_all), so
+    # model/migration drift fails the suite instead of passing green (INFRA-02 review fix). The
+    # append-only triggers ship in migration c0ffee000001 and are applied here too.
+    _reset_schema()
+    cfg = Config(_ALEMBIC_INI)
+    cfg.set_main_option("sqlalchemy.url", settings.database_url_test)
+    command.upgrade(cfg, "head")
     yield
-    Base.metadata.drop_all(_engine)
+    _reset_schema()
 
 
 @pytest.fixture()

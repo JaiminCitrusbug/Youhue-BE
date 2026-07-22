@@ -29,3 +29,10 @@ def get_checkin(db: Session, checkin_id: uuid.UUID) -> CheckIn | None:
 def mark_scored(db: Session, checkin: CheckIn) -> None:
     checkin.scored = True
     db.flush()
+
+
+def bump_score_attempt(db: Session, checkin: CheckIn) -> int:
+    """Record a failed scoring attempt; caller dead-letters once the bounded cap is reached."""
+    checkin.score_attempts += 1
+    db.flush()
+    return checkin.score_attempts

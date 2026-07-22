@@ -13,6 +13,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     func,
 )
@@ -41,7 +42,11 @@ class ConcernWordList(Base):
 
 class Flag(Base):
     __tablename__ = "flags"
-    __table_args__ = (Index("ix_flags_school_status", "school_id", "status"),)
+    __table_args__ = (
+        Index("ix_flags_school_status", "school_id", "status"),
+        # one flag per scored check-in -> scoring is idempotent on retry (INFRA-06 §Must-nots).
+        UniqueConstraint("checkin_id", name="uq_flags_checkin_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     student_id: Mapped[uuid.UUID] = mapped_column(
@@ -53,7 +58,8 @@ class Flag(Base):
     checkin_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("check_ins.id"), nullable=True)
     type: Mapped[FlagType] = mapped_column(Enum(FlagType, name="flag_type"), nullable=False)
     risk_score: Mapped[float] = mapped_column(Numeric(3, 2), nullable=False)
-    band: Mapped[FlagBand] = mapped_column(Enum(FlagBand, name="flag_band"), nullable=False)
+    # band is the ACTION band — decided by FR-12-06 routing, not this pipeline; null until routed.
+    band: Mapped[FlagBand | None] = mapped_column(Enum(FlagBand, name="flag_band"), nullable=True)
     status: Mapped[FlagStatus] = mapped_column(
         Enum(FlagStatus, name="flag_status"), nullable=False, default=FlagStatus.open
     )
@@ -75,10 +81,21 @@ class AlertRecipientConfig(Base):
 
 
 class AlertDelivery(Base):
+    """Per-channel delivery lifecycle (INFRA-05). One row per (notification, channel).
+
+    Owns delivery state/attempts/backoff so the Notification stays the message only. `flag_id` is
+    nullable because invites/transactional notifications have no flag.
+    """
+
     __tablename__ = "alert_deliveries"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    flag_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("flags.id"), nullable=False, index=True)
+    notification_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("notifications.id"), nullable=False, index=True
+    )
+    flag_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("flags.id"), nullable=True, index=True
+    )
     recipient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("staff_accounts.id"), nullable=False)
     channel: Mapped[AlertChannel] = mapped_column(
         Enum(AlertChannel, name="alert_channel"), nullable=False
@@ -87,6 +104,8 @@ class AlertDelivery(Base):
         Enum(DeliveryStatus, name="delivery_status"), nullable=False, default=DeliveryStatus.queued
     )
     attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
+    # backoff: the earliest time the worker may (re)attempt this delivery; NULL once terminal/sent.
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

@@ -67,10 +67,14 @@ class Settings(BaseSettings):
     mfa_max_attempts: int = 5  # OTP verification attempt cap (anti-brute-force)
 
     # ---- risk pipeline (INFRA-06) — env-driven; D-05/D-18 pending ratification ----
-    risk_immediate_threshold: float = 0.80        # >= immediate band
-    risk_triage_threshold: float = 0.50           # >= triage band, else none
-    slowburn_low_mood_threshold: int = 2          # mood_value <= this counts as low
-    slowburn_window_days: int = 5                 # consecutive-day window
+    # NB: this pipeline produces risk_score + Flag only; the action BAND is decided by FR-12-06
+    # routing (ticket §Must-nots) — thresholds below are the score->triage cue routing will consume.
+    risk_immediate_threshold: float = 0.80        # score cue: immediate concern
+    risk_triage_threshold: float = 0.50           # score cue: triage, else no flag
+    slowburn_low_mood_threshold: int = 2          # mood_value <= this counts as a "low" day
+    slowburn_window_days: int = 5                 # trailing window the trend is evaluated over
+    slowburn_min_low_days: int = 2                # distinct low days within the window to flag
+    max_score_attempts: int = 3                   # retries before a scoring error dead-letters
     # platform default concern-word list (school lists override; PLACEHOLDER — needs ratification)
     default_concern_words: str = "hurt,scared,alone,hate,worthless,hopeless,unsafe,help"
 

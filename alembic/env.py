@@ -9,7 +9,10 @@ from src.domain import registry as models  # noqa: F401  (registers all tables o
 from config.db_connection import Base
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# Respect a caller-supplied URL (e.g. the test harness pointing at youhue_test); otherwise the app's.
+if not config.get_main_option("sqlalchemy.url"):
+    config.set_main_option("sqlalchemy.url", settings.database_url)
+_db_url = config.get_main_option("sqlalchemy.url")
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -19,7 +22,7 @@ target_metadata = Base.metadata
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=settings.database_url,
+        url=_db_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},

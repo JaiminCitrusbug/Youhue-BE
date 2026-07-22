@@ -6,7 +6,6 @@ from sqlalchemy.orm import Session
 
 from src.application.authz import services as authz
 from src.application.isolation import services as isolation
-from src.domain.identity import services as identity_db
 from src.domain.identity.models import StaffAccount, Student
 
 
@@ -16,12 +15,13 @@ def _audit(db: Session, staff: StaffAccount, action: str, target: str) -> None:
 
 
 def read_student(db: Session, staff: StaffAccount, student_id: uuid.UUID) -> Student:
-    student = identity_db.get_student(db, student_id)
+    # INFRA-02 (which-rows): a cross-school or unknown id resolves to None -> existence is hidden.
+    student = isolation.get_scoped(db, Student, student_id, staff.school_id)
     if student is None:
         _audit(db, staff, "student.read.denied", str(student_id))
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")  # hide existence
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")
     try:
-        authz.require_student_access(db, staff, student)  # school + class scope
+        authz.require_student_access(db, staff, student)  # INFRA-03 (who-may): role + class scope
     except HTTPException:
         _audit(db, staff, "student.read.denied", str(student.id))
         raise

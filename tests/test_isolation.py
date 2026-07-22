@@ -41,6 +41,22 @@ def test_cross_tenant_read_denied(client, make_school, make_staff, make_student)
     assert r.status_code == 403
 
 
+def test_teacher_denied_same_school_other_class_over_http(
+    client, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class
+):
+    # DoD §28: every protected route has a disallowed-actor test — teacher, same school, wrong class.
+    school = make_school(code="A")
+    teacher = make_staff(school, email="a@oakwood.edu")
+    klass = make_class(school)
+    grant_class_access(teacher, klass)
+    add_to_class(klass, make_student(school, name="Own"))
+    other = make_student(school, name="Other")  # same school, not in the teacher's class
+    r = client.get(
+        f"/api/v1/students/{other.id}", headers=_auth(_staff_token(client, "a@oakwood.edu"))
+    )
+    assert r.status_code == 403
+
+
 def test_student_session_cannot_read_student_records(client, make_school, make_student):
     school = make_school(code="A")
     student = make_student(school)

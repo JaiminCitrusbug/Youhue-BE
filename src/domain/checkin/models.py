@@ -42,6 +42,9 @@ class CheckIn(Base):
     captured_offline: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     within_window: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     scored: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # scoring queue
+    score_attempts: Mapped[int] = mapped_column(  # bounded-retry counter before dead-letter
+        SmallInteger, nullable=False, default=0
+    )
     submitted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

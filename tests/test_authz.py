@@ -71,3 +71,24 @@ def test_district_denied_student_level(db, make_school, make_staff, make_student
     school = make_school()
     district = make_staff(school, email="d@oakwood.edu", role=StaffRole.district)
     assert authz.can_access_student(db, district, make_student(school)) is False
+
+
+def test_support_limited_to_shared_class_only(
+    db, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class
+):
+    # SRS §8: Support/Co-teacher = teacher toolset scoped to the SHARED class only — never an owner
+    # class or whole-school. A support grant with scope=owner must NOT confer access.
+    from src.constants.enums import StaffClassScope
+
+    school = make_school()
+    support = make_staff(school, email="sup@oakwood.edu", role=StaffRole.support)
+    shared_class = make_class(school, name="Shared")
+    owner_class = make_class(school, name="Owned")
+    shared_student = make_student(school, name="SharedKid")
+    owned_student = make_student(school, name="OwnedKid")
+    grant_class_access(support, shared_class, scope=StaffClassScope.shared)
+    grant_class_access(support, owner_class, scope=StaffClassScope.owner)
+    add_to_class(shared_class, shared_student)
+    add_to_class(owner_class, owned_student)
+    assert authz.can_access_student(db, support, shared_student) is True   # shared -> yes
+    assert authz.can_access_student(db, support, owned_student) is False   # owner-scope -> denied

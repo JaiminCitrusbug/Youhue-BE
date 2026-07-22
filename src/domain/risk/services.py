@@ -12,6 +12,10 @@ def get_concern_word_list(db: Session, school_id: uuid.UUID) -> ConcernWordList 
     return db.scalar(select(ConcernWordList).where(ConcernWordList.school_id == school_id))
 
 
+def get_flag_by_checkin(db: Session, checkin_id: uuid.UUID) -> Flag | None:
+    return db.scalar(select(Flag).where(Flag.checkin_id == checkin_id))
+
+
 def create_flag(
     db: Session,
     *,
@@ -20,7 +24,7 @@ def create_flag(
     checkin_id: uuid.UUID | None,
     flag_type: FlagType,
     risk_score: float,
-    band: FlagBand,
+    band: FlagBand | None = None,  # unrouted at creation — FR-12-06 sets the action band
 ) -> Flag:
     flag = Flag(
         student_id=student_id,
