@@ -50,6 +50,7 @@ class Notification(Base):
     delivery_status: Mapped[DeliveryStatus] = mapped_column(
         Enum(DeliveryStatus, name="delivery_status"), nullable=False, default=DeliveryStatus.queued
     )
+    attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
