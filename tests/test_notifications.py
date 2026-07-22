@@ -97,3 +97,28 @@ def test_feed_returns_only_own_in_app(client, db, make_school, make_staff):
     types = {n["type"] for n in feed}
     assert "mine" in types and "theirs" not in types
     assert all(n["channel"] == "in_app" for n in feed)
+
+
+def test_delivery_webhook_requires_secret(client, db, make_school, make_staff, monkeypatch):
+    from src.config import settings
+    recipient = make_staff(make_school(), email="r@oakwood.edu")
+    rows = notif.enqueue(db, recipient_id=recipient.id, ntype="t", payload=None)
+    db.commit()
+    url = f"/api/v1/notifications/{next(r.id for r in rows if r.channel == AlertChannel.email)}/delivery"
+    monkeypatch.setattr(settings, "sendgrid_webhook_secret", None)
+    assert client.post(url, json={"delivered": True}).status_code == 503  # not configured
+    monkeypatch.setattr(settings, "sendgrid_webhook_secret", "s3cret")
+    assert client.post(url, json={"delivered": True}).status_code == 401  # wrong/missing secret
+    ok = client.post(url, json={"delivered": True}, headers={"x-webhook-secret": "s3cret"})
+    assert ok.status_code == 200
+
+
+def test_callback_failed_is_terminal(db, make_school, make_staff):
+    recipient = make_staff(make_school(), email="r@oakwood.edu")
+    rows = notif.enqueue(db, recipient_id=recipient.id, ntype="t", payload=None)
+    db.commit()
+    email_id = next(r.id for r in rows if r.channel == AlertChannel.email)
+    notif.confirm_delivery(db, email_id, delivered=False)  # -> failed (terminal)
+    db.commit()
+    late = notif.confirm_delivery(db, email_id, delivered=True)  # a late webhook can't un-fail it
+    assert late is not None and late.delivery_status == DeliveryStatus.failed

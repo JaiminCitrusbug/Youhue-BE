@@ -49,8 +49,13 @@ def enqueue(
 
 
 def _email_content(n: Notification) -> tuple[str, str]:
-    # preserves producer-supplied context; never a bare notice
-    body = str(n.payload) if n.payload else n.type
+    # channel-appropriate: the actionable reason, NOT the raw payload/PII (detail stays in-app)
+    reason = ""
+    if isinstance(n.payload, dict):
+        value = n.payload.get("reason")
+        if isinstance(value, str):
+            reason = f" — {value}"
+    body = f"You have a Youhue notification: {n.type}{reason}. Sign in to view."
     return f"[Youhue] {n.type}", body
 
 
@@ -58,10 +63,12 @@ def dispatch_pending(db: Session) -> int:
     """Worker step: attempt all queued/retrying email notifications. Returns the count processed."""
     pending = list(
         db.scalars(
-            select(Notification).where(
+            select(Notification)
+            .where(
                 Notification.channel == AlertChannel.email,
                 Notification.delivery_status.in_([DeliveryStatus.queued, DeliveryStatus.retrying]),
             )
+            .with_for_update(skip_locked=True)  # claim rows -> no concurrent double-send
         )
     )
     for n in pending:
@@ -105,8 +112,8 @@ def confirm_delivery(
     n = db.get(Notification, notification_id)
     if n is None:
         return None
-    if n.delivery_status == DeliveryStatus.delivered:
-        return n  # already terminal-success -> idempotent
+    if n.delivery_status in (DeliveryStatus.delivered, DeliveryStatus.failed):
+        return n  # terminal states are idempotent; a late/out-of-order webhook can't flip them
     n.delivery_status = DeliveryStatus.delivered if delivered else DeliveryStatus.failed
     db.flush()
     return n

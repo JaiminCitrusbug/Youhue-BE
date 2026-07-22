@@ -44,11 +44,12 @@ class Settings(BaseSettings):
     lockout_max_attempts: int = 5
     lockout_window_minutes: int = 15
 
-    # ---- email transport (INFRA-05) ----
-    email_backend: str = "file"                   # file | sendgrid
-    email_file_dir: str = "./var/mail"            # where file backend drops .eml
+    # ---- external integrations: TEST/ACTIVE dual flow (backend.md) ----
+    active_env: str = "TEST"                       # TEST (local/mock) | ACTIVE (real providers)
+    # email
+    email_file_dir: str = "./var/mail"            # TEST sink (.eml files); git-ignored
     email_from: str = "no-reply@youhue.app"
-    sendgrid_api_key: str | None = None           # required only when email_backend=sendgrid
+    sendgrid_api_key: str | None = None           # required when ACTIVE_ENV=ACTIVE
     sendgrid_webhook_secret: str | None = None
 
     # ---- staff SSO (INFRA-01) — real OAuth 2.0/OIDC, enabled per-provider when creds present ----

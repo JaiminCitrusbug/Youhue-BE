@@ -1,4 +1,9 @@
 """INFRA-02 isolation: cross-tenant reads denied (403) as the disallowed actor, over HTTP."""
+import uuid
+
+import pytest
+from sqlalchemy.exc import DatabaseError
+
 from src.application import isolation
 from src.infrastructure.models.compliance import AuditLog
 from src.infrastructure.models.identity import Student
@@ -63,3 +68,33 @@ def test_get_scoped_rejects_other_school(db, make_school, make_student):
     student_b = make_student(school_b)
     assert isolation.get_scoped(db, Student, student_b.id, school_a.id) is None
     assert isolation.get_scoped(db, Student, student_b.id, school_b.id) is not None
+
+
+def test_denied_cross_tenant_read_is_audited(client, db, make_school, make_staff, make_student):
+    make_staff(make_school(code="A"), email="a@oakwood.edu")
+    student_b = make_student(make_school(code="B"))
+    client.get(f"/api/v1/students/{student_b.id}", headers=_auth(_staff_token(client, "a@oakwood.edu")))
+    assert any(r.action == "student.read.denied" for r in db.query(AuditLog).all())  # intrusion signal
+
+
+def test_audit_log_is_immutable(db):
+    isolation.audit(db, actor_id=uuid.uuid4(), action="x", target="y")
+    db.commit()
+    with pytest.raises(DatabaseError):  # DB trigger blocks UPDATE on the append-only table
+        db.query(AuditLog).update({AuditLog.action: "hacked"})
+        db.flush()
+    db.rollback()
+
+
+def test_get_scoped_via_student_isolates(db, make_school, make_staff, make_student):
+    from src.infrastructure.models.risk import SupportiveNote
+    school_a = make_school(code="A")
+    school_b = make_school(code="B")
+    student_b = make_student(school_b)
+    sender = make_staff(school_b, email="s@oakwood.edu")
+    note = SupportiveNote(student_id=student_b.id, sender_id=sender.id, body="x", is_private=True)
+    db.add(note)
+    db.commit()
+    # a student-child row (no own school_id) isolates via its student's school
+    assert isolation.get_scoped_via_student(db, SupportiveNote, note.id, school_a.id) is None
+    assert isolation.get_scoped_via_student(db, SupportiveNote, note.id, school_b.id) is not None

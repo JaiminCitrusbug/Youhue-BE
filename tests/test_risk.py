@@ -112,3 +112,52 @@ def test_pipeline_takes_no_student_action(db, make_school, make_student):
     db.commit()
     assert db.query(Flag).count() == 1  # a flag is raised
     assert db.query(Notification).count() == 0  # but NOTHING is sent/acted (routing+alerting is later)
+
+
+def test_slow_burn_flags_with_a_missed_day(db, make_school, make_student):
+    # low on 4 distinct days (one day missed) -> still flags: counts DISTINCT DAYS, not rows (M3 fix)
+    school = make_school()
+    student = make_student(school)
+    for i in (1, 2, 4):
+        _mk_checkin(db, student, school, mood=1, when=datetime.now(UTC) - timedelta(days=i))
+    latest = _mk_checkin(db, student, school, mood=1)
+    assert risk.score_checkin(db, latest).flagged is True
+
+
+def test_slow_burn_single_day_does_not_flag(db, make_school, make_student):
+    # many low check-ins but all on ONE day -> not a multi-day pattern -> no flag (M3 fix)
+    school = make_school()
+    student = make_student(school)
+    for _ in range(6):
+        _mk_checkin(db, student, school, mood=1)
+    assert risk.score_checkin(db, _mk_checkin(db, student, school, mood=1)).flagged is False
+
+
+def test_empty_school_wordlist_opts_out(db, make_school, make_student):
+    # a school that clears its list opts OUT of concern-word detection (M8 fix)
+    school = make_school()
+    student = make_student(school)
+    db.add(ConcernWordList(school_id=school.id, words=[], is_default=False))
+    db.commit()
+    c = _mk_checkin(db, student, school, reflection="i feel hopeless")  # a default word
+    assert risk.score_checkin(db, c).flagged is False
+
+
+def test_scoring_error_dead_letters_without_poisoning_batch(db, make_school, make_student, monkeypatch):
+    import src.application.risk as risk_mod
+    school = make_school()
+    student = make_student(school)
+    bad = _mk_checkin(db, student, school, reflection="i feel unsafe")
+    _mk_checkin(db, student, school, reflection="ok")
+    original = risk_mod.score_checkin
+
+    def flaky(db_, c):
+        if c.id == bad.id:
+            raise RuntimeError("boom")
+        return original(db_, c)
+
+    monkeypatch.setattr(risk_mod, "score_checkin", flaky)
+    risk.process_pending(db)
+    db.commit()
+    # the bad one is dead-lettered and the good one is NOT lost -> nothing stuck unscored (B2 fix)
+    assert db.query(CheckIn).filter(CheckIn.scored.is_(False)).count() == 0

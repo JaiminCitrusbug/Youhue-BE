@@ -1,12 +1,13 @@
 """Notification endpoints (INFRA-05). Enqueue is in-school-scoped; the feed is per-recipient."""
 
 import uuid
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, status
 from pydantic import BaseModel
 
 from src.application import notifications as notif
+from src.config import settings
 from src.infrastructure.models.identity import StaffAccount
 from src.interfaces.deps import DbDep, StaffDep
 
@@ -45,9 +46,16 @@ def enqueue_notification(body: EnqueueRequest, staff: StaffDep, db: DbDep) -> di
 
 @router.post("/{notification_id}/delivery")
 def delivery_callback(
-    notification_id: uuid.UUID, body: DeliveryCallback, db: DbDep
+    notification_id: uuid.UUID,
+    body: DeliveryCallback,
+    db: DbDep,
+    x_webhook_secret: Annotated[str | None, Header()] = None,
 ) -> dict[str, str]:
-    # Provider webhook (SendGrid) — verify SENDGRID_WEBHOOK_SECRET in the active env; idempotent.
+    # Provider webhook (SendGrid) — authenticated by a shared secret; idempotent.
+    if not settings.sendgrid_webhook_secret:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Delivery webhook not configured")
+    if x_webhook_secret != settings.sendgrid_webhook_secret:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook signature")
     n = notif.confirm_delivery(db, notification_id, body.delivered)
     db.commit()
     return {"status": n.delivery_status.value if n else "unknown"}

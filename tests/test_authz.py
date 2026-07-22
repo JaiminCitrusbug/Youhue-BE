@@ -64,3 +64,10 @@ def test_teacher_signin_no_mfa(client, make_school, make_staff):
 def test_role_requires_mfa_helper():
     assert authz.role_requires_mfa(StaffRole.district) is True
     assert authz.role_requires_mfa(StaffRole.teacher) is False
+
+
+def test_district_denied_student_level(db, make_school, make_staff, make_student):
+    # SRS §8: district sees aggregates only — never a student-level row (review B1 fix)
+    school = make_school()
+    district = make_staff(school, email="d@oakwood.edu", role=StaffRole.district)
+    assert authz.can_access_student(db, district, make_student(school)) is False

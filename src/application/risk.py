@@ -38,9 +38,9 @@ def _utcnow() -> datetime:
 
 
 def resolve_words(db: Session, school_id: uuid.UUID) -> list[str]:
-    """School override list where present, else the platform default."""
+    """School override list where present (even if empty — a school may opt out), else default."""
     row = db.scalar(select(ConcernWordList).where(ConcernWordList.school_id == school_id))
-    if row is not None and row.words:
+    if row is not None:
         return [w.lower() for w in row.words]
     return settings.concern_words
 
@@ -63,16 +63,26 @@ def detect_concern_word(reflection: str | None, words: list[str]) -> tuple[list[
 
 
 def detect_slow_burn(db: Session, student_id: uuid.UUID) -> float:
+    """Aggregate by DISTINCT DAY, not raw rows: a multi-day low streak flags even with a missed
+    day; many check-ins on one day can't trip it; a recovered day clears it.
+    """
     since = _utcnow() - timedelta(days=settings.slowburn_window_days)
     recent = list(
         db.scalars(
             select(CheckIn).where(CheckIn.student_id == student_id, CheckIn.submitted_at >= since)
         )
     )
-    if len(recent) < settings.slowburn_window_days:
+    if not recent:
         return 0.0
-    all_low = all(c.mood_value <= settings.slowburn_low_mood_threshold for c in recent)
-    return SLOW_BURN_SCORE if all_low else 0.0
+    days: dict[object, list[int]] = {}
+    for c in recent:
+        days.setdefault(c.submitted_at.date(), []).append(c.mood_value)
+    low = settings.slowburn_low_mood_threshold
+    all_days_low = all(all(m <= low for m in moods) for moods in days.values())
+    # >= 2 distinct days (a real multi-day pattern) and every day stayed low
+    if len(days) >= 2 and all_days_low:
+        return SLOW_BURN_SCORE
+    return 0.0
 
 
 def score_checkin(db: Session, checkin: CheckIn) -> ScoreResult:
@@ -107,12 +117,27 @@ def score_checkin(db: Session, checkin: CheckIn) -> ScoreResult:
 
 
 def process_pending(db: Session) -> int:
-    """Worker: score all unscored check-ins (durable queue). Errors surfaced, never dropped."""
-    pending = list(db.scalars(select(CheckIn).where(CheckIn.scored.is_(False))))
+    """Worker: score unscored check-ins (durable queue). Per-item commit so one failure can't poison
+    the batch; a failed item is surfaced (CRITICAL) and dead-lettered (scored=True) so it is never
+    reprocessed forever. `SKIP LOCKED` prevents concurrent workers double-scoring the same row.
+    """
+    pending = list(
+        db.scalars(
+            select(CheckIn).where(CheckIn.scored.is_(False)).with_for_update(skip_locked=True)
+        )
+    )
+    processed = 0
     for c in pending:
+        checkin_id = c.id
         try:
             score_checkin(db, c)
+            db.commit()
+            processed += 1
         except Exception:  # noqa: BLE001
-            logger.critical("fr_12_01_error checkin=%s", c.id)  # surfaced; not silently dropped
-    db.flush()
-    return len(pending)
+            db.rollback()
+            logger.critical("fr_12_01_error checkin=%s", checkin_id)  # surfaced, not dropped
+            fresh = db.get(CheckIn, checkin_id)
+            if fresh is not None:
+                fresh.scored = True  # dead-letter — do not loop on it forever
+                db.commit()
+    return processed

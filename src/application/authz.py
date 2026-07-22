@@ -12,10 +12,12 @@ from sqlalchemy.orm import Session
 from src.config import settings
 from src.domain.enums import StaffRole
 from src.infrastructure.models.identity import StaffAccount, Student
-from src.infrastructure.models.org import ClassMembership, StaffClassAccess
+from src.infrastructure.models.org import ClassGroup, ClassMembership, StaffClassAccess
 
-# Roles that see every student in their own school (not class-scoped).
-_WHOLE_SCHOOL_ROLES = (StaffRole.leadership, StaffRole.district)
+# Roles that may read every student in their OWN school (student-level access).
+# District is intentionally EXCLUDED: district has only aggregate surfaces — student-level data
+# never leaves its school (SRS §8). So district falls through to False in can_access_student.
+_WHOLE_SCHOOL_ROLES = (StaffRole.leadership,)
 # Roles scoped to the classes they own/share.
 _CLASS_SCOPED_ROLES = (StaffRole.teacher, StaffRole.support)
 
@@ -35,9 +37,15 @@ def can_access_student(db: Session, staff: StaffAccount, student: Student) -> bo
     if staff.role in _WHOLE_SCHOOL_ROLES:
         return True
     if staff.role in _CLASS_SCOPED_ROLES:
+        # class must belong to the staff's own school (defense-in-depth on top of the school check)
         class_ids = list(
             db.scalars(
-                select(StaffClassAccess.class_id).where(StaffClassAccess.staff_id == staff.id)
+                select(StaffClassAccess.class_id)
+                .join(ClassGroup, ClassGroup.id == StaffClassAccess.class_id)
+                .where(
+                    StaffClassAccess.staff_id == staff.id,
+                    ClassGroup.school_id == staff.school_id,
+                )
             )
         )
         if not class_ids:

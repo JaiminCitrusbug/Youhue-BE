@@ -34,6 +34,11 @@ _TestSession = sessionmaker(bind=_engine, autoflush=False, expire_on_commit=Fals
 def _schema() -> Generator[None, None, None]:
     Base.metadata.drop_all(_engine)
     Base.metadata.create_all(_engine)
+    from src.infrastructure.ddl import BLOCK_FN, trigger_sql
+    with _engine.begin() as conn:  # append-only triggers (dev/prod get them via migration)
+        conn.execute(text(BLOCK_FN))  # text() so SQLAlchemy escapes % for psycopg
+        conn.execute(text(trigger_sql("audit_logs")))
+        conn.execute(text(trigger_sql("flag_events")))
     yield
     Base.metadata.drop_all(_engine)
 

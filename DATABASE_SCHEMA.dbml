@@ -1,0 +1,249 @@
+// Youhue — Phase 1 physical schema (DBML). Source of truth: docs/design/domain-model.md (SRS §13).
+// INFRA-02 implements this via SQLAlchemy 2 models + a single Alembic migration.
+// Convention: UUID v4 PKs, TIMESTAMPTZ (UTC), every school-scoped table carries school_id (indexed).
+
+// ---------------- Enums (one per §13.4 state machine + attribute enums) ----------------
+Enum school_status { pending; active; rejected }
+Enum school_tier { free; premium }
+Enum staff_auth_provider { password; google; microsoft }
+Enum staff_role { teacher; support; leadership; district }
+Enum staff_status { invited; sent; accepted; active; deactivated }
+Enum student_age_band { b5_7; b8_11; b12_18 }
+Enum student_status { active; inactive }
+Enum staff_class_scope { owner; shared }
+Enum invitation_status { invited; sent; accepted; revoked; expired }
+Enum activity_scope { seed; school }
+Enum activity_type { breathing; grounding; stretch; brain_break }
+Enum activity_age_band { b5_7; b8_11; b12_18; all }
+Enum activity_engagement_status { offered; started; completed }
+Enum flag_type { concern_word; slow_burn }
+Enum flag_band { immediate; triage; none }
+Enum flag_status { open; acknowledged; escalated; actioned; closed }
+Enum alert_channel { email; in_app }
+Enum delivery_status { queued; sent; delivered; failed; retrying }
+Enum flag_event_type { alerted; viewed; acted; escalated }
+Enum subscription_tier { free; premium }
+Enum subscription_state { trial; active; free; cancelled }
+Enum parental_consent_status { pending; verified }
+Enum data_export_kind { export; export_and_delete }
+Enum data_export_status { pending; ready; completed }
+
+// ---------------- Tenant root ----------------
+Table schools {
+  id uuid [pk]
+  name varchar [not null]
+  status school_status [not null, default: 'pending']
+  tier school_tier [not null, default: 'free']
+  timezone varchar [not null, note: 'IANA']
+  created_at timestamptz [not null, default: `now()`]
+}
+
+// ---------------- Identity / org ----------------
+Table staff_accounts {
+  id uuid [pk]
+  school_id uuid [not null, ref: > schools.id]
+  email varchar [not null]
+  auth_provider staff_auth_provider [not null, default: 'password']
+  role staff_role [not null]
+  status staff_status [not null, default: 'invited']
+  mfa_enabled boolean [not null, default: false]
+  created_at timestamptz [not null, default: `now()`]
+  indexes { (school_id, email) [unique] }
+}
+
+Table students {
+  id uuid [pk]
+  school_id uuid [not null, ref: > schools.id]
+  external_ref varchar
+  display_name varchar [not null]
+  age_band student_age_band [not null]
+  status student_status [not null, default: 'active']
+  created_at timestamptz [not null, default: `now()`]
+  indexes { school_id }
+}
+
+Table class_groups {
+  id uuid [pk]
+  school_id uuid [not null, ref: > schools.id]
+  name varchar [not null]
+  indexes { school_id }
+}
+
+Table class_memberships {
+  id uuid [pk]
+  class_id uuid [not null, ref: > class_groups.id]
+  student_id uuid [not null, ref: > students.id]
+  indexes { (class_id, student_id) [unique] }
+}
+
+Table staff_class_access {
+  id uuid [pk]
+  staff_id uuid [not null, ref: > staff_accounts.id]
+  class_id uuid [not null, ref: > class_groups.id]
+  scope staff_class_scope [not null, default: 'owner']
+  indexes { (staff_id, class_id) [unique] }
+}
+
+Table invitations {
+  id uuid [pk]
+  school_id uuid [not null, ref: > schools.id]
+  class_id uuid [ref: > class_groups.id]
+  inviter_id uuid [not null, ref: > staff_accounts.id]
+  email varchar [not null]
+  token varchar [not null, unique, note: 'single-use']
+  status invitation_status [not null, default: 'invited']
+  expires_at timestamptz [not null]
+  indexes { school_id }
+}
+
+// ---------------- Check-in & activities ----------------
+Table check_ins {
+  id uuid [pk]
+  student_id uuid [not null, ref: > students.id]
+  school_id uuid [not null, ref: > schools.id]
+  mood_value smallint [not null]
+  reflection_text text
+  captured_offline boolean [not null, default: false]
+  within_window boolean [not null, default: true]
+  submitted_at timestamptz [not null, default: `now()`]
+  indexes { (school_id, submitted_at) }
+}
+
+Table activities {
+  id uuid [pk]
+  scope activity_scope [not null, default: 'seed']
+  school_id uuid [ref: > schools.id]
+  title varchar [not null]
+  type activity_type [not null]
+  age_band activity_age_band [not null, default: 'all']
+  topic varchar
+}
+
+Table activity_engagements {
+  id uuid [pk]
+  student_id uuid [not null, ref: > students.id]
+  activity_id uuid [not null, ref: > activities.id]
+  checkin_id uuid [ref: > check_ins.id]
+  status activity_engagement_status [not null, default: 'offered']
+  at timestamptz [not null, default: `now()`]
+}
+
+Table calendar_configs {
+  id uuid [pk]
+  school_id uuid [not null, ref: > schools.id]
+  window_start time [not null]
+  window_end time [not null]
+  timezone varchar [not null, note: 'IANA']
+  holidays "date[]"
+  indexes { school_id }
+}
+
+// ---------------- Risk / alerting (M-12 sole writer of flag score/band) ----------------
+Table concern_word_lists {
+  id uuid [pk]
+  school_id uuid [ref: > schools.id, note: 'NULL + is_default = platform default']
+  words "text[]" [not null]
+  is_default boolean [not null, default: false]
+}
+
+Table flags {
+  id uuid [pk]
+  student_id uuid [not null, ref: > students.id]
+  school_id uuid [not null, ref: > schools.id]
+  checkin_id uuid [ref: > check_ins.id]
+  type flag_type [not null]
+  risk_score "numeric(3,2)" [not null]
+  band flag_band [not null]
+  status flag_status [not null, default: 'open']
+  created_at timestamptz [not null, default: `now()`]
+  indexes { (school_id, status) }
+}
+
+Table alert_recipient_configs {
+  id uuid [pk]
+  school_id uuid [not null, ref: > schools.id]
+  alert_type varchar [not null]
+  recipient_staff_ids "uuid[]" [not null]
+  order_index smallint [not null, default: 0]
+  indexes { school_id }
+}
+
+Table alert_deliveries {
+  id uuid [pk]
+  flag_id uuid [not null, ref: > flags.id]
+  recipient_id uuid [not null, ref: > staff_accounts.id]
+  channel alert_channel [not null]
+  status delivery_status [not null, default: 'queued']
+  attempts smallint [not null, default: 0]
+  delivered_at timestamptz
+}
+
+Table flag_events {
+  id uuid [pk, note: 'append-only / immutable']
+  flag_id uuid [not null, ref: > flags.id]
+  event_type flag_event_type [not null]
+  actor_id uuid [ref: > staff_accounts.id]
+  at timestamptz [not null, default: `now()`]
+}
+
+Table supportive_notes {
+  id uuid [pk]
+  student_id uuid [not null, ref: > students.id]
+  sender_id uuid [not null, ref: > staff_accounts.id]
+  flag_id uuid [ref: > flags.id]
+  body text [not null]
+  is_private boolean [not null, default: true]
+  at timestamptz [not null, default: `now()`]
+}
+
+// ---------------- Subscription / notification ----------------
+Table subscriptions {
+  id uuid [pk]
+  school_id uuid [not null, ref: > schools.id]
+  tier subscription_tier [not null, default: 'free']
+  state subscription_state [not null, default: 'trial']
+  trial_start_at timestamptz
+  trial_end_at timestamptz
+  trial_extension_count smallint [not null, default: 0]
+  term_end_at timestamptz
+  indexes { school_id }
+}
+
+Table notifications {
+  id uuid [pk]
+  recipient_id uuid [not null, ref: > staff_accounts.id]
+  type varchar [not null]
+  payload jsonb
+  channel alert_channel [not null]
+  delivery_status delivery_status [not null, default: 'queued']
+  created_at timestamptz [not null, default: `now()`]
+  indexes { recipient_id }
+}
+
+// ---------------- Compliance ----------------
+Table parental_consents {
+  id uuid [pk]
+  student_id uuid [not null, ref: > students.id]
+  status parental_consent_status [not null, default: 'pending']
+  captured_at timestamptz
+}
+
+Table data_exports {
+  id uuid [pk]
+  school_id uuid [not null, ref: > schools.id]
+  requested_by uuid [not null, ref: > staff_accounts.id]
+  kind data_export_kind [not null]
+  status data_export_status [not null, default: 'pending']
+  created_at timestamptz [not null, default: `now()`]
+  indexes { school_id }
+}
+
+Table audit_logs {
+  id uuid [pk, note: 'system-wide immutable']
+  school_id uuid [ref: > schools.id, note: 'nullable = system-level action']
+  actor_id uuid [not null]
+  action varchar [not null]
+  target varchar [not null]
+  at timestamptz [not null, default: `now()`]
+  indexes { school_id }
+}

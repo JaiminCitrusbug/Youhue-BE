@@ -5,7 +5,7 @@ from src.config import Settings
 def test_settings_load_with_defaults() -> None:
     s = Settings()
     assert s.api_prefix == "/api/v1"
-    assert s.email_backend in {"file", "sendgrid"}
+    assert s.active_env in {"TEST", "ACTIVE"}
     assert 0.0 <= s.risk_triage_threshold <= s.risk_immediate_threshold <= 1.0
 
 
