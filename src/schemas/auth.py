@@ -1,27 +1,12 @@
-"""Auth request/response schemas (Pydantic v2)."""
+"""Shared auth schemas: the session token response and the /me probe.
+
+Student request schemas live in ``src.schemas.student_auth`` and staff-specific request schemas in
+``src.schemas.staff_auth`` (decision #4 module split); ``TokenResponse`` is shared by every sign-in
+surface and stays here.
+"""
 import uuid
 
-from pydantic import BaseModel, EmailStr, Field
-
-
-class StaffSignIn(BaseModel):
-    email: EmailStr
-    password: str = Field(max_length=256)
-    device_id: str | None = None
-
-
-class ForgotPassword(BaseModel):
-    email: EmailStr
-
-
-class ResetPassword(BaseModel):
-    token: str
-    new_password: str = Field(min_length=8, max_length=256)
-
-
-class MfaVerify(BaseModel):
-    session_token: str
-    code: str
+from pydantic import BaseModel
 
 
 class TokenResponse(BaseModel):
