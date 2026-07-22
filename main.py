@@ -1,6 +1,6 @@
 """Youhue backend application entrypoint (FastAPI).
 
-Layered structure (interfaces -> application -> domain / infrastructure). Feature routers are
+Layered structure (routers -> application -> domain / infrastructure). Feature routers are
 mounted per ticket in execution order.
 """
 from fastapi import FastAPI
