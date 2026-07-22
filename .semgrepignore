@@ -1,0 +1,6 @@
+# SAST (semgrep) is scoped to APPLICATION SOURCE. CI-workflow YAML under .github/ is
+# infrastructure config, not runtime product code, and uses first-party GitHub actions
+# (actions/checkout, actions/setup-python) pinned by major tag. Pinning those to commit
+# SHAs is a hardening follow-up tracked as DEF-008. Excluded here so SAST stays focused
+# on app-code vulnerabilities (mirrors the root .semgrepignore that excludes non-product dirs).
+.github/
