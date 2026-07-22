@@ -14,10 +14,13 @@ def _staff_token(client, email: str, pw: str = "Password123") -> str:
     return client.post(SIGNIN, json={"email": email, "password": pw}).json()["access_token"]
 
 
-def test_staff_reads_own_school_student(client, make_school, make_staff, make_student):
+def test_staff_reads_own_class_student(client, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class):
     school = make_school(code="A")
-    make_staff(school, email="a@oakwood.edu")
+    staff = make_staff(school, email="a@oakwood.edu")
     student = make_student(school, name="Amy")
+    klass = make_class(school)
+    grant_class_access(staff, klass)
+    add_to_class(klass, student)
     r = client.get(f"/api/v1/students/{student.id}", headers=_auth(_staff_token(client, "a@oakwood.edu")))
     assert r.status_code == 200
     assert r.json()["display_name"] == "Amy"
@@ -42,10 +45,13 @@ def test_student_session_cannot_read_student_records(client, make_school, make_s
     assert client.get(f"/api/v1/students/{student.id}", headers=_auth(token)).status_code == 403
 
 
-def test_read_writes_immutable_audit(client, db, make_school, make_staff, make_student):
+def test_read_writes_immutable_audit(client, db, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class):
     school = make_school(code="A")
-    make_staff(school, email="a@oakwood.edu")
+    staff = make_staff(school, email="a@oakwood.edu")
     student = make_student(school)
+    klass = make_class(school)
+    grant_class_access(staff, klass)
+    add_to_class(klass, student)
     client.get(f"/api/v1/students/{student.id}", headers=_auth(_staff_token(client, "a@oakwood.edu")))
     rows = db.query(AuditLog).all()
     assert any(r.action == "student.read" and r.target == str(student.id) for r in rows)

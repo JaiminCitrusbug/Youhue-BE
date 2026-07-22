@@ -44,7 +44,7 @@ def sign_in(db: Session, email: str, password: str, device_id: str | None = None
         raise _GENERIC_401
     lockout.record_attempt(db, ident, succeeded=True)
 
-    if staff.mfa_enabled:
+    if staff.mfa_enabled or staff.role.value in settings.mfa_roles:  # forced for privileged roles
         sess = sessions.create_session(
             db, staff.id, SessionKind.staff, settings.mfa_otp_ttl_minutes,
             school_id=staff.school_id, device_id=device_id, mfa_pending=True,

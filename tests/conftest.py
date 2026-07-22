@@ -12,10 +12,17 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from src.application.auth.security import hash_password
 from src.config import settings
-from src.domain.enums import SchoolStatus, StaffRole, StaffStatus, StudentAgeBand
+from src.domain.enums import (
+    SchoolStatus,
+    StaffClassScope,
+    StaffRole,
+    StaffStatus,
+    StudentAgeBand,
+)
 from src.infrastructure import models  # noqa: F401  (register tables)
 from src.infrastructure.db import Base, get_db
 from src.infrastructure.models.identity import School, StaffAccount, Student
+from src.infrastructure.models.org import ClassGroup, ClassMembership, StaffClassAccess
 from src.interfaces.ratelimit import reset as reset_ratelimit
 from src.main import app
 
@@ -98,3 +105,31 @@ def make_student(db: Session) -> Callable[..., Student]:
         db.refresh(student)
         return student
     return _make
+
+
+@pytest.fixture()
+def make_class(db: Session) -> Callable[..., ClassGroup]:
+    def _make(school: School, name: str = "3A") -> ClassGroup:
+        klass = ClassGroup(school_id=school.id, name=name)
+        db.add(klass)
+        db.commit()
+        db.refresh(klass)
+        return klass
+    return _make
+
+
+@pytest.fixture()
+def grant_class_access(db: Session) -> Callable[..., None]:
+    def _grant(staff: StaffAccount, klass: ClassGroup,
+               scope: StaffClassScope = StaffClassScope.owner) -> None:
+        db.add(StaffClassAccess(staff_id=staff.id, class_id=klass.id, scope=scope))
+        db.commit()
+    return _grant
+
+
+@pytest.fixture()
+def add_to_class(db: Session) -> Callable[..., None]:
+    def _add(klass: ClassGroup, student: Student) -> None:
+        db.add(ClassMembership(class_id=klass.id, student_id=student.id))
+        db.commit()
+    return _add

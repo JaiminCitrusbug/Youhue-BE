@@ -22,10 +22,11 @@ def test_logout_revokes_session(client, make_school, make_staff):
 
 def test_me_returns_identity(client, make_school, make_staff):
     school = make_school()
-    make_staff(school, email="head@oakwood.edu", password="Password123", role=StaffRole.leadership)
-    me = client.get("/api/v1/me", headers=_auth(_signin(client, "head@oakwood.edu"))).json()
+    # support role: not MFA-forced, so the session is usable immediately
+    make_staff(school, email="co@oakwood.edu", password="Password123", role=StaffRole.support)
+    me = client.get("/api/v1/me", headers=_auth(_signin(client, "co@oakwood.edu"))).json()
     assert me["kind"] == "staff"
-    assert me["role"] == "leadership"
+    assert me["role"] == "support"
     assert me["school_id"] == str(school.id)
 
 
