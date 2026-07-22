@@ -1,0 +1,84 @@
+# Copy to: <each repo>/.github/workflows/security-scan.yml
+# Runs on both backend and frontend repos. Free, open-source scanners only.
+name: Security Scan
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Secret scan (gitleaks)
+        # Free for public and personal-account private repos.
+        # GitHub ORGANISATION private repos need a free GITLEAKS_LICENSE key (see gitleaks docs),
+        # OR use the binary alternative below to stay license-free.
+        run: |
+          GL_VER=8.21.2
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GL_VER}/gitleaks_${GL_VER}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks detect --source . --redact --no-banner --exit-code 1
+
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: SAST (semgrep)
+        run: |
+          python -m pip install --upgrade pip
+          pip install semgrep
+          semgrep scan --config p/ci --error --skip-unknown-extensions
+
+  # --- Spine #7 additions: dependency + supply-chain baseline as failing CI jobs ---
+  sca:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: SCA — dependency manifests must exist (FAIL-CLOSED, audit P0-3/P0-10)
+        run: |
+          if [ ! -f requirements.txt ] && [ ! -f pyproject.toml ] && [ ! -f package-lock.json ]; then
+            echo "::error::no dependency manifest found (requirements.txt / pyproject.toml / package-lock.json)."
+            echo "::error::The old behaviour silently PASSED this job on a repo with no manifest. If this repo truly has no dependencies, record an owner-signed N/A in docs/gates/APPLICABILITY.md and remove this job for the repo with that sign-off."
+            exit 1
+          fi
+      - name: SCA — Python deps (pip-audit)
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          if [ -f requirements.txt ] || [ -f pyproject.toml ]; then pip-audit; else echo "no Python manifest — Node repo (manifest check above passed)"; fi
+      - name: SCA — Node deps (npm audit, level from .thresholds.yml)
+        run: |
+          LEVEL=$(grep -A3 'security:' .thresholds.yml | grep 'sca_fail_on' | sed 's/#.*//' | awk -F: '{print $2}' | tr -d ' ' || echo "")
+          LEVEL=${LEVEL:-critical}
+          if [ -f package-lock.json ]; then npm audit --audit-level="$LEVEL"; else echo "no package-lock.json — Python repo (manifest check above passed)"; fi
+
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: SBOM (syft) — generate + upload artifact
+        run: |
+          # Version PINNED (Wave-1, audit 09C: installing 'whatever main serves today' is a
+          # supply-chain risk in the tool that produces the supply-chain evidence).
+          SYFT_VER=v1.18.1
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin "$SYFT_VER"
+          syft version
+          syft dir:. -o cyclonedx-json > sbom.cyclonedx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cyclonedx.json
