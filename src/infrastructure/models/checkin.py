@@ -36,7 +36,7 @@ class CheckIn(Base):
     reflection_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     captured_offline: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     within_window: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    scored: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # risk-scoring queue flag
+    scored: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # scoring queue
     submitted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
