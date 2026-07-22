@@ -5,7 +5,8 @@ from collections.abc import Sequence
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.constants.enums import StaffClassScope
+from src.constants.enums import SchoolStatus, StaffClassScope
+from src.domain.identity.models import School
 from src.domain.org.models import ClassGroup, ClassMembership, StaffClassAccess
 
 
@@ -36,3 +37,39 @@ def student_in_any_class(db: Session, student_id: uuid.UUID, class_ids: list[uui
         )
     )
     return member is not None
+
+
+def get_class(db: Session, class_id: uuid.UUID) -> ClassGroup | None:
+    return db.get(ClassGroup, class_id)
+
+
+def get_class_by_join_code(db: Session, code: str) -> ClassGroup | None:
+    """A class join code resolves only within an ACTIVE school (FR-01-02 sign-in path)."""
+    return db.scalar(
+        select(ClassGroup)
+        .join(School, School.id == ClassGroup.school_id)
+        .where(ClassGroup.join_code == code, School.status == SchoolStatus.active)
+    )
+
+
+def get_class_by_qr_token(db: Session, token: str) -> ClassGroup | None:
+    """The persistent per-class qr_token resolves only within an ACTIVE school (FR-01-02)."""
+    return db.scalar(
+        select(ClassGroup)
+        .join(School, School.id == ClassGroup.school_id)
+        .where(ClassGroup.qr_token == token, School.status == SchoolStatus.active)
+    )
+
+
+def student_in_class(db: Session, student_id: uuid.UUID, class_id: uuid.UUID) -> bool:
+    return student_in_any_class(db, student_id, [class_id])
+
+
+def set_class_access(
+    db: Session, klass: ClassGroup, join_code: str, qr_token: str
+) -> ClassGroup:
+    """Persist a class's issued/rotated persistent join code + qr token (FR-01-02 issuance)."""
+    klass.join_code = join_code
+    klass.qr_token = qr_token
+    db.flush()
+    return klass

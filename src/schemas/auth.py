@@ -10,12 +10,6 @@ class StaffSignIn(BaseModel):
     device_id: str | None = None
 
 
-class StudentSignIn(BaseModel):
-    school_code: str
-    student_id: uuid.UUID
-    device_id: str | None = None
-
-
 class ForgotPassword(BaseModel):
     email: EmailStr
 

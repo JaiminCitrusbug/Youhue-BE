@@ -45,6 +45,15 @@ def new_numeric_code(length: int) -> str:
     return "".join(secrets.choice("0123456789") for _ in range(length))
 
 
+# Unambiguous alphabet for human-typed class join codes (no 0/O/1/I to avoid mis-keying).
+_JOIN_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def new_join_code(length: int = 6) -> str:
+    """Short, human-typable class join code (FR-01-02); cryptographically random."""
+    return "".join(secrets.choice(_JOIN_CODE_ALPHABET) for _ in range(length))
+
+
 def encode_jwt(claims: dict[str, Any], expires_at: datetime) -> str:
     payload = {**claims, "exp": expires_at}
     return str(jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm))

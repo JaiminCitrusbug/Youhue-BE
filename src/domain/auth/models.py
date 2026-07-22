@@ -26,6 +26,10 @@ class AuthSession(Base):
     )
     school_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)  # null = admin
     device_id: Mapped[str | None] = mapped_column(String, nullable=True)  # single-device
+    # FR-01-02: the class qr_token this student-session was established from. Replay protection is
+    # per student-session (decision #2) — while this session is active the same student cannot
+    # re-consume the token. Null for code / staff / admin sign-ins.
+    qr_token: Mapped[str | None] = mapped_column(String, nullable=True)
     mfa_pending: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

@@ -279,7 +279,8 @@ def test_score_endpoint_denies_student_session(client, db, make_school, make_stu
     student = make_student(school)
     c = _mk_checkin(db, student, school, reflection="i feel unsafe")
     token = client.post(
-        "/api/v1/auth/student/sign-in", json={"school_code": "OAK-9", "student_id": str(student.id)}
-    ).json()["access_token"]
+        "/api/v1/auth/student/sign-in",
+        json={"school_or_class_code": "OAK-9", "student_id": str(student.id)},
+    ).json()["session_token"]
     r = client.post("/api/v1/risk/score", json={"checkin_id": str(c.id)}, headers=_auth(token))
     assert r.status_code == 403

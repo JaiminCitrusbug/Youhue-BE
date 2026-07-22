@@ -23,6 +23,7 @@ def create_session_row(
     school_id: uuid.UUID | None,
     device_id: str | None,
     mfa_pending: bool,
+    qr_token: str | None = None,
 ) -> AuthSession:
     sess = AuthSession(
         subject_id=subject_id,
@@ -30,11 +31,27 @@ def create_session_row(
         school_id=school_id,
         device_id=device_id,
         mfa_pending=mfa_pending,
+        qr_token=qr_token,
         expires_at=_utcnow() + timedelta(minutes=ttl_minutes),
     )
     db.add(sess)
     db.flush()
     return sess
+
+
+def active_session_by_qr_token(
+    db: Session, subject_id: uuid.UUID, qr_token: str
+) -> AuthSession | None:
+    """An unexpired, un-revoked session this student already established from this qr_token.
+    Its existence means re-presenting the token is a replay (FR-01-02 single-use per session)."""
+    return db.scalar(
+        select(AuthSession).where(
+            AuthSession.subject_id == subject_id,
+            AuthSession.qr_token == qr_token,
+            AuthSession.revoked_at.is_(None),
+            AuthSession.expires_at > _utcnow(),
+        )
+    )
 
 
 def get_session(db: Session, jti: uuid.UUID) -> AuthSession | None:

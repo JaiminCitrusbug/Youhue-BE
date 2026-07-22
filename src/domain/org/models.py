@@ -19,6 +19,10 @@ class ClassGroup(Base):
         ForeignKey("schools.id"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(String, nullable=False)
+    # FR-01-02: persistent per-class sign-in credentials issued/rotated by the class-access
+    # service (teacher UI is FR-01-09). Rotate-only — no auto-expiry. Null until first issued.
+    join_code: Mapped[str | None] = mapped_column(String, nullable=True, unique=True)
+    qr_token: Mapped[str | None] = mapped_column(String, nullable=True, unique=True)
 
 
 class ClassMembership(Base):

@@ -26,6 +26,7 @@ def create_session(
     school_id: uuid.UUID | None = None,
     device_id: str | None = None,
     mfa_pending: bool = False,
+    qr_token: str | None = None,
 ) -> AuthSession:
     if kind == SessionKind.student and settings.student_single_active_device:
         auth_db.revoke_all_sessions_for_subject(db, subject_id)  # single active device
@@ -37,6 +38,7 @@ def create_session(
         school_id=school_id,
         device_id=device_id,
         mfa_pending=mfa_pending,
+        qr_token=qr_token,
     )
 
 

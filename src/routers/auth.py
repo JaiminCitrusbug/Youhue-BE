@@ -1,12 +1,12 @@
-"""Auth endpoints (INFRA-01). Two surfaces (student/staff); a student session never resolves a
-staff route. Sign-in errors are generic; forgot-password is 202. Sign-in/OTP/forgot are throttled.
-Thin router — business logic lives in src.application.*"""
+"""Staff/shared auth endpoints (INFRA-01). The student surface lives in `routers.student_auth`
+(decision #4); a student session never resolves a staff route. Sign-in errors are generic;
+forgot-password is 202. Sign-in/OTP/forgot are throttled. Thin router — business logic lives in
+src.application.*"""
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from src.application.auth import sessions
 from src.application.auth import sso as sso_svc
 from src.application.auth import staff as staff_svc
-from src.application.auth import student as student_svc
 from src.application.me import services as me_svc
 from src.infrastructure.middlewares.auth_middleware import AnySessionDep, DbDep, SessionDep
 from src.infrastructure.middlewares.ratelimit import rate_limit
@@ -16,7 +16,6 @@ from src.schemas.auth import (
     MfaVerify,
     ResetPassword,
     StaffSignIn,
-    StudentSignIn,
     TokenResponse,
 )
 
@@ -38,13 +37,6 @@ def staff_mfa_verify(body: MfaVerify, db: DbDep) -> TokenResponse:
     except HTTPException:
         db.commit()  # persist any failed-attempt record (brute-force cap)
         raise
-    db.commit()
-    return result
-
-
-@router.post("/student/sign-in", response_model=TokenResponse, dependencies=_throttle)
-def student_sign_in(body: StudentSignIn, db: DbDep) -> TokenResponse:
-    result = student_svc.sign_in(db, body.school_code, body.student_id, body.device_id)
     db.commit()
     return result
 

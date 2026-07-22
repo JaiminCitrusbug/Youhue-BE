@@ -64,8 +64,9 @@ def test_student_session_cannot_read_student_records(client, make_school, make_s
     school = make_school(code="A")
     student = make_student(school)
     token = client.post(
-        "/api/v1/auth/student/sign-in", json={"school_code": "A", "student_id": str(student.id)}
-    ).json()["access_token"]
+        "/api/v1/auth/student/sign-in",
+        json={"school_or_class_code": "A", "student_id": str(student.id)},
+    ).json()["session_token"]
     assert client.get(f"/api/v1/students/{student.id}", headers=_auth(token)).status_code == 403
 
 
