@@ -11,7 +11,8 @@ from datetime import date, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.domain.checkin.models import CheckIn, CheckInSettings
+from src.constants.enums import ActivityAgeBand, ActivityScope, ActivityType
+from src.domain.checkin.models import Activity, CheckIn, CheckInSettings
 
 
 def get_checkins_since(db: Session, student_id: uuid.UUID, since: datetime) -> list[CheckIn]:
@@ -172,3 +173,45 @@ def bump_score_attempt(db: Session, checkin: CheckIn) -> int:
     checkin.score_attempts += 1
     db.flush()
     return checkin.score_attempts
+
+
+# ---- FR-19-04: seed activity set (scope=seed only; school-scoped activities are Phase 2) ----
+
+def add_seed_activity(
+    db: Session,
+    *,
+    title: str,
+    type: ActivityType,
+    age_band: ActivityAgeBand,
+    topic: str | None,
+) -> Activity:
+    """Insert a new platform seed activity (school_id is NULL — global to every school)."""
+    activity = Activity(
+        scope=ActivityScope.seed,
+        school_id=None,
+        title=title,
+        type=type,
+        age_band=age_band,
+        topic=topic,
+    )
+    db.add(activity)
+    db.flush()
+    return activity
+
+
+def get_seed_activity(db: Session, activity_id: uuid.UUID) -> Activity | None:
+    """Fetch a single seed-scoped activity by id; a school-scoped id resolves to None here."""
+    return db.scalars(
+        select(Activity).where(
+            Activity.id == activity_id, Activity.scope == ActivityScope.seed
+        )
+    ).one_or_none()
+
+
+def list_seed_activities(db: Session, *, include_retired: bool = False) -> list[Activity]:
+    """List seed activities, active-first by title. Retired (active=False) excluded by default —
+    the set FR-05-01/FR-14-02 consume is the active subset."""
+    stmt = select(Activity).where(Activity.scope == ActivityScope.seed)
+    if not include_retired:
+        stmt = stmt.where(Activity.active.is_(True))
+    return list(db.scalars(stmt.order_by(Activity.title)))

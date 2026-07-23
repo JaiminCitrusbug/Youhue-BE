@@ -27,6 +27,7 @@ from src.application.auth import admin as admin_svc
 from src.application.authz import admin as admin_authz
 from src.application.concern_words import services as concern_words_svc
 from src.application.school_admin import services as school_admin_svc
+from src.application.seed import services as seed_svc
 from src.constants.enums import SessionKind
 from src.domain.billing.models import Subscription
 from src.domain.identity.models import InternalAdmin, School
@@ -43,6 +44,10 @@ from src.schemas.admin import (
     SchoolDetail,
     SchoolListItem,
     SchoolsListResponse,
+    SeedActivityCreate,
+    SeedActivityListResponse,
+    SeedActivityResponse,
+    SeedActivityUpdate,
 )
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -188,3 +193,58 @@ def patch_school(
         ) from None
     db.commit()
     return SchoolActionResponse(action=body.action, school=_school_detail(school, sub))
+
+
+# ---- FR-19-04: maintain the platform seed activity set (gated by `manage_seed`) ----
+# Every write commits on success (persist the activity + its audit record) and on the 403 path
+# (persist the audit-logged RBAC denial before surfacing the error) — errors are never swallowed.
+
+@router.post("/seed-activities", response_model=SeedActivityResponse)
+def create_seed_activity(
+    body: SeedActivityCreate, admin: AdminDep, db: DbDep
+) -> SeedActivityResponse:
+    try:
+        activity = seed_svc.create_seed_activity(db, admin, body)
+    except HTTPException:
+        db.commit()
+        raise
+    db.commit()
+    return SeedActivityResponse(activity=activity)  # type: ignore[arg-type]
+
+
+@router.get("/seed-activities", response_model=SeedActivityListResponse)
+def list_seed_activities(
+    admin: AdminDep, db: DbDep, include_retired: bool = False
+) -> SeedActivityListResponse:
+    try:
+        activities = seed_svc.list_seed_activities(db, admin, include_retired=include_retired)
+    except HTTPException:
+        db.commit()
+        raise
+    return SeedActivityListResponse.of(activities)
+
+
+@router.patch("/seed-activities/{activity_id}", response_model=SeedActivityResponse)
+def edit_seed_activity(
+    activity_id: uuid.UUID, body: SeedActivityUpdate, admin: AdminDep, db: DbDep
+) -> SeedActivityResponse:
+    try:
+        activity = seed_svc.edit_seed_activity(db, admin, activity_id, body)
+    except HTTPException:
+        db.commit()
+        raise
+    db.commit()
+    return SeedActivityResponse(activity=activity)  # type: ignore[arg-type]
+
+
+@router.delete("/seed-activities/{activity_id}", response_model=SeedActivityResponse)
+def retire_seed_activity(
+    activity_id: uuid.UUID, admin: AdminDep, db: DbDep
+) -> SeedActivityResponse:
+    try:
+        activity = seed_svc.retire_seed_activity(db, admin, activity_id)
+    except HTTPException:
+        db.commit()
+        raise
+    db.commit()
+    return SeedActivityResponse(activity=activity)  # type: ignore[arg-type]

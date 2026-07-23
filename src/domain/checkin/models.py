@@ -88,6 +88,11 @@ class Activity(Base):
         Enum(ActivityAgeBand, name="activity_age_band"), nullable=False, default=ActivityAgeBand.all
     )
     topic: Mapped[str | None] = mapped_column(String, nullable=True)
+    # FR-19-04: retire = soft-deactivate (active=False). Retired seed activities stay in the table
+    # (engagement history / audit) but are excluded from the set schools consume (FR-05-01/14-02).
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
 
 
 class ActivityEngagement(Base):

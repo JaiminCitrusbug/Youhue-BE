@@ -6,9 +6,10 @@ import enum
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-from src.constants.enums import SchoolStatus, SchoolTier, SubscriptionState
+from src.constants.enums import ActivityAgeBand, ActivityType, SchoolStatus, SchoolTier, SubscriptionState
+from src.domain.checkin.models import Activity
 
 
 class AdminSignIn(BaseModel):
@@ -103,3 +104,54 @@ class SchoolActionRequest(BaseModel):
 class SchoolActionResponse(BaseModel):
     action: AdminSchoolAction
     school: SchoolDetail
+
+
+# ---- FR-19-04: seed activity set (internal-team maintenance, gated by `manage_seed`) ----
+
+class SeedActivityCreate(BaseModel):
+    """Add a seed activity available to all schools. Invalid `type` / `age_band` -> 422."""
+
+    title: str = Field(min_length=1, max_length=200)
+    type: ActivityType
+    age_band: ActivityAgeBand = ActivityAgeBand.all
+    topic: str | None = Field(default=None, max_length=200)
+
+
+class SeedActivityUpdate(BaseModel):
+    """Edit a seed activity. Every field optional — only supplied fields change (PATCH semantics).
+    `active=False` retires; `active=True` re-instates."""
+
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    type: ActivityType | None = None
+    age_band: ActivityAgeBand | None = None
+    topic: str | None = Field(default=None, max_length=200)
+    active: bool | None = None
+
+
+class SeedActivityOut(BaseModel):
+    """A single seed activity as the admin console (and later FR-05-01/FR-14-02) reads it."""
+
+    model_config = ConfigDict(from_attributes=True, use_enum_values=True)
+
+    id: uuid.UUID
+    title: str
+    type: ActivityType
+    age_band: ActivityAgeBand
+    topic: str | None
+    active: bool
+
+
+class SeedActivityResponse(BaseModel):
+    """POST/PATCH/DELETE envelope — the maintained activity, available to all schools."""
+
+    activity: SeedActivityOut
+
+
+class SeedActivityListResponse(BaseModel):
+    """GET envelope — the current seed set."""
+
+    activities: list[SeedActivityOut]
+
+    @classmethod
+    def of(cls, activities: list[Activity]) -> "SeedActivityListResponse":
+        return cls(activities=[SeedActivityOut.model_validate(a) for a in activities])
