@@ -16,6 +16,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
@@ -32,12 +33,30 @@ from src.constants.enums import (
 
 
 class ConcernWordList(Base):
+    """A concern-word list. Exactly one PLATFORM DEFAULT (school_id NULL, is_default true —
+    maintained by the internal team, FR-19-05) plus zero-or-one OVERRIDE per school (school_id set,
+    is_default false, leadership-owned FR-16-02). The risk pipeline (INFRA-06) uses a school's
+    override where present, otherwise this default (FR-12-01). A default change never reaches a
+    school override (GATE G-6) — they are distinct rows keyed on is_default / school_id."""
+
     __tablename__ = "concern_word_lists"
+    __table_args__ = (
+        # At most ONE platform default row — a partial unique index over the is_default=true rows
+        # keeps the default a single, upsert-idempotent record (FR-19-05 writes are retry-safe).
+        Index(
+            "uq_concern_word_lists_default",
+            "is_default",
+            unique=True,
+            postgresql_where=text("is_default"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     school_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("schools.id"), nullable=True)
     words: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False)
-    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_default: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
 
 
 class Flag(Base):

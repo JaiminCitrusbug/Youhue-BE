@@ -22,3 +22,19 @@ class AdminSignInResponse(BaseModel):
     admin_session: str | None = None
     role: str | None = None
     mfa_required: bool = False
+
+
+class DefaultWordListUpdate(BaseModel):
+    """FR-19-05 — the full replacement set for the platform default concern-word list (add/edit/
+    remove entries by sending the new complete list). Server-side normalized + validated."""
+
+    words: list[str] = Field(max_length=1000)
+
+
+class DefaultWordListResponse(BaseModel):
+    """The persisted platform default after an update — normalized words + entry count.
+    `is_default` marks this as the platform default (a school override is a separate list)."""
+
+    words: list[str]
+    count: int
+    is_default: bool = True

@@ -16,11 +16,17 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from src.application.auth import admin as admin_svc
 from src.application.authz import admin as admin_authz
+from src.application.concern_words import services as concern_words_svc
 from src.constants.enums import SessionKind
 from src.domain.identity.models import InternalAdmin
 from src.infrastructure.middlewares.auth_middleware import DbDep, SessionDep
 from src.infrastructure.middlewares.ratelimit import rate_limit
-from src.schemas.admin import AdminSignIn, AdminSignInResponse
+from src.schemas.admin import (
+    AdminSignIn,
+    AdminSignInResponse,
+    DefaultWordListResponse,
+    DefaultWordListUpdate,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 _throttle = [Depends(rate_limit)]
@@ -60,3 +66,19 @@ def probe_seed_maintenance(admin: AdminDep, db: DbDep) -> dict[str, str]:
         db.commit()  # persist the audit-logged denial before surfacing the 403
         raise
     return {"status": "ok", "action": "seed-maintenance", "role": admin.role.value}
+
+
+@router.put("/concern-words/default", response_model=DefaultWordListResponse)
+def update_default_concern_words(
+    body: DefaultWordListUpdate, admin: AdminDep, db: DbDep
+) -> DefaultWordListResponse:
+    """FR-19-05: maintain the platform DEFAULT concern-word list. `manage_word_lists`-gated
+    (a role without it -> 403, audit-logged). GATE G-6: schools that have overridden the default
+    are unaffected — only the is_default row is written. Applies to schools with no override."""
+    try:
+        words = concern_words_svc.update_default(db, admin, body.words)
+    except HTTPException:
+        db.commit()  # persist the audit-logged RBAC denial before surfacing the error
+        raise
+    db.commit()
+    return DefaultWordListResponse(words=words, count=len(words))

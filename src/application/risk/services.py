@@ -43,11 +43,16 @@ def combine_risk_score(concern_score: float, slow_burn_score: float) -> float:
 
 
 def resolve_words(db: Session, school_id: uuid.UUID) -> list[str]:
-    """School override list where present (even if empty — a school may opt out), else default."""
+    """School override list where present (even if empty — a school may opt out), else the
+    admin-maintained platform DEFAULT (FR-19-05), else the env seed. GATE G-6: a school's own
+    override always wins, so changing the default never affects a school that has overridden it."""
     row = risk_db.get_concern_word_list(db, school_id)
     if row is not None:
         return [w.lower() for w in row.words]
-    return settings.concern_words
+    default = risk_db.get_default_concern_word_list(db)
+    if default is not None:
+        return [w.lower() for w in default.words]
+    return settings.concern_words  # env seed until the internal team ratifies a default
 
 
 def _word_present(word: str, text: str) -> bool:
