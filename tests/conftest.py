@@ -91,8 +91,11 @@ def client(db: Session) -> Generator[TestClient, None, None]:
 @pytest.fixture()
 def make_school(db: Session) -> Callable[..., School]:
     def _make(code: str = "SCH-001", status: SchoolStatus = SchoolStatus.active,
-              name: str = "Oakwood") -> School:
-        school = School(name=name, timezone="UTC", sign_in_code=code, status=status)
+              name: str | None = None) -> School:
+        # Default name is derived from the code: `uq_schools_name_live` forbids two non-rejected
+        # schools sharing a name, so a fixed default would make every two-tenant test collide.
+        school = School(name=name or f"Oakwood {code}", timezone="UTC", sign_in_code=code,
+                        status=status)
         db.add(school)
         db.commit()
         db.refresh(school)

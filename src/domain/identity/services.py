@@ -39,6 +39,18 @@ def get_staff_by_sso_subject(
     )
 
 
+def get_staff_by_email_in_school(
+    db: Session, email: str, school_id: uuid.UUID
+) -> StaffAccount | None:
+    """Any status. The registrant of a still-pending school is deliberately NOT active yet
+    (FR-02-01), so the registration flow cannot use the active-only lookup below."""
+    return db.scalar(
+        select(StaffAccount).where(
+            StaffAccount.email == email.lower(), StaffAccount.school_id == school_id
+        )
+    )
+
+
 def get_active_staff_by_email_in_school(
     db: Session, email: str, school_id: uuid.UUID
 ) -> StaffAccount | None:
@@ -61,14 +73,32 @@ def get_school(db: Session, school_id: uuid.UUID) -> School | None:
     return db.get(School, school_id)
 
 
-def get_active_school_by_name(db: Session, name: str) -> School | None:
-    """An APPROVED (active) school matching this name, case-insensitively (FR-02-01 Scenario 3 —
-    a later teacher from the same school joins it rather than creating a duplicate)."""
+def get_school_by_name(db: Session, name: str) -> School | None:
+    """A school that already holds this name, case-insensitively — PENDING or APPROVED alike
+    (FR-02-01 Scenario 3: a later teacher must not create a duplicate). Mirrors the
+    ``uq_schools_name_live`` partial unique index exactly, including its exclusion of REJECTED
+    schools, whose name is released for a fresh registration.
+
+    ``name`` is expected to arrive whitespace-normalised (see the application service)."""
     return db.scalar(
         select(School).where(
             func.lower(School.name) == name.strip().lower(),
-            School.status == SchoolStatus.active,
+            School.status != SchoolStatus.rejected,
         )
+    )
+
+
+def school_is_active(db: Session, school_id: uuid.UUID) -> bool:
+    """Is this school LIVE? A self-registered school is pending until a District/Trust admin
+    approves it (FR-02-01/FR-02-02) and, while pending, its staff get no session and reach no
+    staff route — 'pending' must mean pending on every surface, not only the student one."""
+    return (
+        db.scalar(
+            select(School.id).where(
+                School.id == school_id, School.status == SchoolStatus.active
+            )
+        )
+        is not None
     )
 
 
@@ -92,10 +122,13 @@ def create_staff(
     email: str,
     password_hash: str,
     role: StaffRole = StaffRole.teacher,
-    status: StaffStatus = StaffStatus.active,
+    status: StaffStatus = StaffStatus.invited,
 ) -> StaffAccount:
-    """Associate a staff account with a school (FR-02-01 makes the registering teacher an active
-    owner so they can sign in to see the pending-approval state)."""
+    """Associate a staff account with a school.
+
+    ``status`` defaults to the model's least-privilege ``invited`` — an account is only ever made
+    ACTIVE by a deliberate, explicit decision. FR-02-01's self-registrant stays ``invited`` until
+    the District/Trust approval (FR-02-02) activates the school and its registrant together."""
     staff = StaffAccount(
         school_id=school_id,
         email=email.lower(),

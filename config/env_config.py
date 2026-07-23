@@ -87,6 +87,12 @@ class Settings(BaseSettings):
 
     # ---- rate limiting (sign-in / token endpoints) ----
     rate_limit_signin_per_minute: int = 10
+    # Public school self-registration (FR-02-01) gets its OWN, tighter bucket: an anonymous
+    # internet-facing write must never be able to spend a legitimate teacher's sign-in budget.
+    rate_limit_register_per_minute: int = 5
+    # Enable ONLY where a reverse proxy rewrites X-Forwarded-For. If nothing strips the header a
+    # caller can forge it and mint a fresh rate-limit bucket per request.
+    trust_proxy_headers: bool = False
 
     @property
     def mfa_roles(self) -> list[str]:

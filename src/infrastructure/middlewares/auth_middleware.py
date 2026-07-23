@@ -14,8 +14,9 @@ from sqlalchemy.orm import Session
 
 from config.db_connection import get_db
 from src.application.auth import sessions
-from src.constants.enums import SessionKind
+from src.constants.enums import SessionKind, StaffStatus
 from src.domain.auth.models import AuthSession
+from src.domain.identity import services as identity_db
 from src.domain.identity.models import StaffAccount
 from src.utils.security import decode_jwt
 
@@ -62,6 +63,13 @@ def get_current_staff(sess: SessionDep, db: DbDep) -> StaffAccount:
     staff = db.get(StaffAccount, sess.subject_id)
     if staff is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "No account")
+    # A staff member acts only from an ACTIVE account at a LIVE school. Every staff route hangs off
+    # StaffDep, so this is the one choke point that makes "pending" mean pending on the staff
+    # surface too: a school awaiting District approval (FR-02-01) or rejected (FR-02-02) can have
+    # no side effect, whatever minted the session and however old it is. Checked per request, so
+    # revoking a school or deactivating an account takes effect immediately, not at token expiry.
+    if staff.status != StaffStatus.active or not identity_db.school_is_active(db, staff.school_id):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")
     return staff
 
 

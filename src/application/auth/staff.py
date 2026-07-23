@@ -2,6 +2,10 @@
 
 Generic errors only — a sign-in failure never reveals whether an email is registered (401);
 forgot-password always returns success (202). All DB access is via domain services.
+
+A correct credential is necessary but not sufficient: the account's SCHOOL must also be live. A
+school self-registered under FR-02-01 is pending until a District/Trust admin approves it, and a
+pending (or rejected) school issues no staff session at all — see ``_SCHOOL_NOT_ACTIVE``.
 """
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -19,6 +23,11 @@ from src.schemas.auth import TokenResponse
 from src.utils import security
 
 _GENERIC_401 = HTTPException(status.HTTP_401_UNAUTHORIZED, "Sign-in failed")
+# Raised only AFTER the credential verified, so it discloses nothing to anyone who is not already
+# the account holder — no enumeration value, and the holder needs to be told why they are stuck.
+_SCHOOL_NOT_ACTIVE = HTTPException(
+    status.HTTP_403_FORBIDDEN, "School is not active yet — it is awaiting District approval"
+)
 
 
 def sign_in(db: Session, email: str, password: str, device_id: str | None = None) -> TokenResponse:
@@ -35,6 +44,8 @@ def sign_in(db: Session, email: str, password: str, device_id: str | None = None
         lockout.record_attempt(db, ident, succeeded=False)
         raise _GENERIC_401
     lockout.record_attempt(db, ident, succeeded=True)
+    if not identity_db.school_is_active(db, staff.school_id):
+        raise _SCHOOL_NOT_ACTIVE  # pending/rejected school -> no session is minted at all
 
     if staff.mfa_enabled or staff.role.value in settings.mfa_roles:  # forced for privileged roles
         sess = sessions.create_session(

@@ -8,7 +8,18 @@ Internal admins are a SEPARATE platform-level account (owner decision), never a 
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String, UniqueConstraint, Uuid, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    String,
+    UniqueConstraint,
+    Uuid,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from config.db_connection import Base
@@ -26,6 +37,19 @@ from src.constants.enums import (
 
 class School(Base):
     __tablename__ = "schools"
+    __table_args__ = (
+        # A school name identifies a tenant, so no two schools that still exist as tenants may
+        # share one (FR-02-01 Must-not: "the system must not create a duplicate school"). Enforced
+        # in the DB because the application read-then-write cannot be: two concurrent registrations
+        # both pass an application-level lookup (review FR-02-01 M3). REJECTED schools are excluded
+        # so a rejected registration's name is free to be submitted again.
+        Index(
+            "uq_schools_name_live",
+            text("lower(name)"),
+            unique=True,
+            postgresql_where=text("status <> 'rejected'::school_status"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String, nullable=False)
@@ -45,7 +69,14 @@ class School(Base):
 
 class StaffAccount(Base):
     __tablename__ = "staff_accounts"
-    __table_args__ = (UniqueConstraint("school_id", "email", name="uq_staff_school_email"),)
+    # Email is unique per school (`uq_staff_school_email`), NOT globally: one teacher may hold an
+    # active account at more than one school on the same email — a deliberate multi-school design
+    # (FR-01-03 SSO account-linking relies on and tests it). FR-02-01 does not tighten this: its
+    # registrant is created non-active (`invited`) so it cannot add an ambiguous active row, and the
+    # duplicate-school Must-not is carried entirely by `uq_schools_name_live` above.
+    __table_args__ = (
+        UniqueConstraint("school_id", "email", name="uq_staff_school_email"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     school_id: Mapped[uuid.UUID] = mapped_column(
