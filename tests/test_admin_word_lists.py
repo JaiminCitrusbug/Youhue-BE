@@ -75,6 +75,100 @@ def test_endpoint_updates_default_and_normalizes(client, db, make_admin, monkeyp
     assert risk_db.get_default_concern_word_list(db).words == ["alone", "hopeless"]
 
 
+# ---- Read the default (so entries can be EDITED / REMOVED, not only added) --
+
+def test_get_default_returns_the_persisted_list(client, db, make_admin, monkeypatch):
+    make_admin(role=AdminRole.superadmin)
+    token = _complete_signin(client, monkeypatch)
+    auth = {"Authorization": f"Bearer {token}"}
+    client.put(ENDPOINT, json={"words": ["alone", "hopeless"]}, headers=auth)
+
+    r = client.get(ENDPOINT, headers=auth)
+    assert r.status_code == 200
+    assert r.json() == {"words": ["alone", "hopeless"], "count": 2, "is_default": True}
+
+
+def test_get_default_is_empty_before_any_default_is_seeded(client, db, make_admin, monkeypatch):
+    make_admin(role=AdminRole.superadmin)
+    assert risk_db.get_default_concern_word_list(db) is None  # nothing seeded yet
+    token = _complete_signin(client, monkeypatch)
+
+    r = client.get(ENDPOINT, headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200
+    assert r.json() == {"words": [], "count": 0, "is_default": True}
+
+
+def test_get_default_reads_the_platform_row_not_a_school_override(client, db, make_admin, make_school, monkeypatch):
+    admin = make_admin(role=AdminRole.superadmin)
+    school = make_school()
+    db.add(ConcernWordList(school_id=school.id, words=["banana"], is_default=False))
+    cw_svc.update_default(db, admin, ["mango"])
+    db.commit()
+    token = _complete_signin(client, monkeypatch)
+
+    r = client.get(ENDPOINT, headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200
+    assert r.json()["words"] == ["mango"]  # never the school's override
+
+
+def test_get_then_put_round_trips_a_removal_without_losing_unseen_entries(db, make_admin):
+    """The read is what makes Scenario 1's 'edit or remove' possible: the admin loads the full
+    persisted set, drops one entry, and saves — the other entries survive."""
+    admin = make_admin(role=AdminRole.superadmin)
+    cw_svc.update_default(db, admin, ["mango", "kiwi", "plum"])
+    db.commit()
+
+    loaded = cw_svc.get_default(db, admin)
+    assert loaded == ["mango", "kiwi", "plum"]
+    cw_svc.update_default(db, admin, [w for w in loaded if w != "kiwi"])
+    db.commit()
+    assert risk_db.get_default_concern_word_list(db).words == ["mango", "plum"]
+
+
+@pytest.mark.authz
+def test_get_default_limited_role_denied_and_audit_logged(db, make_admin):
+    support = make_admin(email="support@youhue.app", role=AdminRole.support)
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        cw_svc.get_default(db, support)
+    assert exc.value.status_code == 403
+    db.commit()
+    rows = (
+        db.query(AuditLog)
+        .filter(AuditLog.action == "admin.rbac.denied:manage_word_lists")
+        .all()
+    )
+    assert len(rows) == 1 and rows[0].target == "admin_console" and rows[0].school_id is None
+
+
+@pytest.mark.authz
+def test_get_endpoint_support_role_forbidden(client, make_admin, monkeypatch):
+    make_admin(email="support@youhue.app", role=AdminRole.support)
+    token = _complete_signin(client, monkeypatch, email="support@youhue.app")
+    r = client.get(ENDPOINT, headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 403
+
+
+def test_get_endpoint_requires_admin_session(client):
+    assert client.get(ENDPOINT).status_code == 403
+
+
+def test_get_default_surfaces_a_read_failure_as_500_not_an_empty_list(db, make_admin, monkeypatch):
+    """A read failure must NEVER look like 'no default yet' — that is the state the editor treats
+    as safe to replace."""
+    admin = make_admin(role=AdminRole.superadmin)
+    from fastapi import HTTPException
+
+    def _boom(_db):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(cw_svc.risk_db, "get_default_concern_word_list", _boom)
+    with pytest.raises(HTTPException) as exc:
+        cw_svc.get_default(db, admin)
+    assert exc.value.status_code == 500
+
+
 # ---- Scenario 2: a school override takes precedence (NEG / GATE G-6) --------
 
 def test_school_override_unaffected_by_default_change(db, make_admin, make_school, make_student):

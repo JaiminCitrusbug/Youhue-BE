@@ -2,6 +2,8 @@
 
 Endpoints:
   POST /api/v1/admin/sign-in            email + password + (email-OTP) MFA -> admin session + role
+  GET  /api/v1/admin/concern-words/default   read the platform default concern-word list (FR-19-05)
+  PUT  /api/v1/admin/concern-words/default   replace it (both `manage_word_lists`-gated)
   GET  /api/v1/admin/_probe/seed-maintenance
         a representative role-gated probe (decision #3) so the NEGATIVE 403 scenario is genuinely
         exercised now: a permitted role -> 200, a limited role -> 403 (audit-logged). Real admin
@@ -66,6 +68,21 @@ def probe_seed_maintenance(admin: AdminDep, db: DbDep) -> dict[str, str]:
         db.commit()  # persist the audit-logged denial before surfacing the 403
         raise
     return {"status": "ok", "action": "seed-maintenance", "role": admin.role.value}
+
+
+@router.get("/concern-words/default", response_model=DefaultWordListResponse)
+def read_default_concern_words(admin: AdminDep, db: DbDep) -> DefaultWordListResponse:
+    """FR-19-05: read the platform DEFAULT concern-word list. Same `manage_word_lists` gate as the
+    PUT (a role without it -> 403, audit-logged; no/non-admin session -> 403). The editor loads
+    this on mount so entries can be EDITED and REMOVED rather than replaced blind — without it a
+    full-replacement PUT would silently drop every word the admin never saw. `words` is empty only
+    when no default has been seeded yet."""
+    try:
+        words = concern_words_svc.get_default(db, admin)
+    except HTTPException:
+        db.commit()  # persist the audit-logged RBAC denial before surfacing the error
+        raise
+    return DefaultWordListResponse(words=words, count=len(words))
 
 
 @router.put("/concern-words/default", response_model=DefaultWordListResponse)

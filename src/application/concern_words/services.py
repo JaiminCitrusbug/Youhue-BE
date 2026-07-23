@@ -53,6 +53,35 @@ def _validate(words: list[str]) -> list[str]:
     return cleaned
 
 
+def get_default(db: Session, admin: InternalAdmin) -> list[str]:
+    """Read the platform default concern-word list so the admin console can EDIT and REMOVE
+    entries, not only add to a blank set (FR-19-05 Scenario 1). Same `manage_word_lists` gate as
+    the write — the maintenance surface is one capability, so read and write share one permission
+    and a role without it is denied 403 (audit-logged) on both.
+
+    Returns [] when the internal team has not seeded a default yet; that is a real, distinguishable
+    state (nothing to destroy), NOT a load failure — a failure raises instead of returning [].
+    Caller commits so the RBAC-denial audit row survives. No word content is logged.
+    """
+    try:
+        admin_authz.require_permission(db, admin, admin_authz.AdminPermission.manage_word_lists)
+    except HTTPException:
+        logger.warning("fr_19_05_forbidden admin=%s action=read", admin.id)
+        raise
+
+    try:
+        row = risk_db.get_default_concern_word_list(db)
+    except Exception:
+        logger.exception("fr_19_05_error admin=%s action=read", admin.id)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not read the default list"
+        ) from None
+
+    words = list(row.words) if row is not None else []
+    logger.info("fr_19_05_success admin=%s action=read count=%s", admin.id, len(words))
+    return words
+
+
 def update_default(db: Session, admin: InternalAdmin, words: list[str]) -> list[str]:
     """Maintain the platform default concern-word list (add/edit/remove = the full replacement set).
     Returns the persisted, normalized words. Caller commits so the RBAC-denial audit row survives.

@@ -32,7 +32,8 @@ class DefaultWordListUpdate(BaseModel):
 
 
 class DefaultWordListResponse(BaseModel):
-    """The persisted platform default after an update — normalized words + entry count.
+    """The persisted platform default — normalized words + entry count. Returned by both the GET
+    (current list, `words: []` until the internal team seeds one) and the PUT (the list as saved).
     `is_default` marks this as the platform default (a school override is a separate list)."""
 
     words: list[str]
