@@ -1,10 +1,10 @@
 """Identity domain services — DB queries only (backend.md: domain owns DB access)."""
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from src.constants.enums import SchoolStatus, StaffStatus, StudentStatus
+from src.constants.enums import SchoolStatus, StaffRole, StaffStatus, StudentStatus
 from src.domain.identity.models import InternalAdmin, School, StaffAccount, Student
 
 
@@ -55,6 +55,57 @@ def get_active_school_by_code(db: Session, code: str) -> School | None:
     return db.scalar(
         select(School).where(School.sign_in_code == code, School.status == SchoolStatus.active)
     )
+
+
+def get_school(db: Session, school_id: uuid.UUID) -> School | None:
+    return db.get(School, school_id)
+
+
+def get_active_school_by_name(db: Session, name: str) -> School | None:
+    """An APPROVED (active) school matching this name, case-insensitively (FR-02-01 Scenario 3 —
+    a later teacher from the same school joins it rather than creating a duplicate)."""
+    return db.scalar(
+        select(School).where(
+            func.lower(School.name) == name.strip().lower(),
+            School.status == SchoolStatus.active,
+        )
+    )
+
+
+def sign_in_code_exists(db: Session, code: str) -> bool:
+    """A school sign-in code is globally unique; used to avoid a collision on generation."""
+    return db.scalar(select(School.id).where(School.sign_in_code == code)) is not None
+
+
+def create_school(db: Session, name: str, sign_in_code: str) -> School:
+    """Create a school in the default PENDING state (SchoolStatus.pending / SchoolTier.free are the
+    model defaults). It is NOT live until a District/Trust admin approves it (FR-02-02)."""
+    school = School(name=name, sign_in_code=sign_in_code)
+    db.add(school)
+    db.flush()
+    return school
+
+
+def create_staff(
+    db: Session,
+    school_id: uuid.UUID,
+    email: str,
+    password_hash: str,
+    role: StaffRole = StaffRole.teacher,
+    status: StaffStatus = StaffStatus.active,
+) -> StaffAccount:
+    """Associate a staff account with a school (FR-02-01 makes the registering teacher an active
+    owner so they can sign in to see the pending-approval state)."""
+    staff = StaffAccount(
+        school_id=school_id,
+        email=email.lower(),
+        password_hash=password_hash,
+        role=role,
+        status=status,
+    )
+    db.add(staff)
+    db.flush()
+    return staff
 
 
 def get_active_student_in_school(

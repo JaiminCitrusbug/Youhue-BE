@@ -54,6 +54,12 @@ def new_join_code(length: int = 6) -> str:
     return "".join(secrets.choice(_JOIN_CODE_ALPHABET) for _ in range(length))
 
 
+def new_school_code(length: int = 8) -> str:
+    """School sign-in code students enter at sign-in (FR-02-01). Same unambiguous alphabet as the
+    class join code; longer default for a school-wide, globally-unique code."""
+    return "".join(secrets.choice(_JOIN_CODE_ALPHABET) for _ in range(length))
+
+
 def encode_jwt(claims: dict[str, Any], expires_at: datetime) -> str:
     payload = {**claims, "exp": expires_at}
     return str(jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm))
