@@ -27,9 +27,13 @@ def _staff_token(client, email: str = "t@oakwood.edu") -> str:
 
 
 def _mk_checkin(db, student, school, mood=3, reflection=None, when=None):
+    # `local_date` backs `uq_checkins_student_local_date` (FR-04-01 review remediation) — derived
+    # from `when` (or "now") the same way the real write path derives it from the school-local day,
+    # so two fixtures for the same student on DIFFERENT `when` days never collide.
+    at = when or datetime.now(UTC)
     c = CheckIn(
         student_id=student.id, school_id=school.id, mood_value=mood,
-        reflection_text=reflection, submitted_at=when or datetime.now(UTC),
+        reflection_text=reflection, submitted_at=at, local_date=at.date(),
     )
     db.add(c)
     db.commit()
@@ -102,7 +106,12 @@ def test_empty_school_wordlist_opts_out(db, make_school, make_student):
 def test_slow_burn_flags_after_low_streak(db, make_school, make_student):
     school = make_school()
     student = make_student(school)
-    for i in range(settings.slowburn_window_days):
+    # i=1..window_days (not 0..window_days-1): `latest` below supplies the "today" (day-0) row
+    # itself, so this + `latest` still totals exactly `slowburn_window_days` distinct low days —
+    # unchanged from before, just not double-booking today via both the loop AND `latest`
+    # (uq_checkins_student_local_date, FR-04-01 review remediation, forbids two rows for one
+    # student on one calendar day).
+    for i in range(1, settings.slowburn_window_days):
         _mk_checkin(db, student, school, mood=1, when=datetime.now(UTC) - timedelta(days=i))
     latest = _mk_checkin(db, student, school, mood=1)
     result = risk.score_checkin(db, latest)
@@ -133,13 +142,31 @@ def test_slow_burn_midwindow_blip_still_flags(db, make_school, make_student):
     assert risk.score_checkin(db, latest).flagged is True
 
 
-def test_slow_burn_single_day_does_not_flag(db, make_school, make_student):
-    # many low check-ins but all on ONE day -> not a multi-day pattern -> no flag
+def test_slow_burn_single_day_does_not_flag(db, make_school, make_student, monkeypatch):
+    # many low check-ins but all on ONE day -> not a multi-day pattern -> no flag. This scenario
+    # can no longer be built from real persisted rows (`uq_checkins_student_local_date`, FR-04-01
+    # review remediation, now forbids two check-ins for one student on one calendar day — the exact
+    # precedent set by "no age_band" becoming an unconstructible Student state, per
+    # docs/reviews/FR-04-01.md Priority #5), so `detect_slow_burn`'s day-bucketing is exercised
+    # directly: `checkin_db.get_checkins_since` is monkeypatched to return many same-day rows (never
+    # persisted — only the ONE real argument row is), which is all `detect_slow_burn` actually reads.
+    import src.application.risk.services as risk_mod
+
     school = make_school()
     student = make_student(school)
-    for _ in range(6):
-        _mk_checkin(db, student, school, mood=1)
-    assert risk.score_checkin(db, _mk_checkin(db, student, school, mood=1)).flagged is False
+    real = _mk_checkin(db, student, school, mood=1)
+    same_day_fakes = [
+        CheckIn(
+            student_id=student.id, school_id=school.id, mood_value=1,
+            submitted_at=real.submitted_at,
+        )
+        for _ in range(6)
+    ] + [real]
+    monkeypatch.setattr(
+        risk_mod.checkin_db, "get_checkins_since",
+        lambda _db, _sid, _since: same_day_fakes,
+    )
+    assert risk.score_checkin(db, real).flagged is False
 
 
 def test_slow_burn_day_count_is_configurable(db, make_school, make_student, monkeypatch):
@@ -185,7 +212,11 @@ def test_scoring_is_idempotent_on_retry(db, make_school, make_student):
 def test_worker_scores_all_pending(db, make_school, make_student):
     school = make_school()
     student = make_student(school)
-    _mk_checkin(db, student, school, reflection="i feel hopeless")
+    # two distinct days — worker batching doesn't care about the date, but two rows for the same
+    # student on the same day would collide with uq_checkins_student_local_date (FR-04-01 review
+    # remediation).
+    _mk_checkin(db, student, school, reflection="i feel hopeless",
+                when=datetime.now(UTC) - timedelta(days=1))
     _mk_checkin(db, student, school, reflection="ok")
     assert risk.process_pending(db) == 2
     db.commit()
@@ -196,7 +227,11 @@ def test_scoring_error_retries_then_dead_letters(db, make_school, make_student, 
     import src.application.risk.services as risk_mod
     school = make_school()
     student = make_student(school)
-    bad = _mk_checkin(db, student, school, reflection="i feel unsafe")
+    # two distinct days — dead-lettering doesn't care about the date, but two rows for the same
+    # student on the same day would collide with uq_checkins_student_local_date (FR-04-01 review
+    # remediation).
+    bad = _mk_checkin(db, student, school, reflection="i feel unsafe",
+                       when=datetime.now(UTC) - timedelta(days=1))
     good = _mk_checkin(db, student, school, reflection="ok")
     original = risk_mod.score_checkin
 

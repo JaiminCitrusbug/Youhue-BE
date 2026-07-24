@@ -1,10 +1,11 @@
 """Check-in + activities models (§13.1)."""
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     Enum,
     ForeignKey,
@@ -12,6 +13,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     func,
     text,
@@ -28,8 +30,23 @@ from src.constants.enums import (
 
 
 class CheckIn(Base):
+    """FR-04-01 review remediation (Blocker 1, `docs/reviews/FR-04-01.md` Finding 1): `local_date`
+    is the school-LOCAL calendar day the check-in was submitted on (computed by the application
+    from `CalendarConfig.timezone` — the same day-boundary math `submit_checkin` already uses for
+    its read-then-write duplicate check), persisted so the DB can enforce "one check-in per student
+    per school-local day" itself via `uq_checkins_student_local_date`, instead of relying only on
+    the app-level select-then-insert that the review proved loses a genuine concurrent race (8/10
+    trials, two rows for one student/day). `submitted_at` alone cannot back this constraint: it is
+    a UTC timestamptz and the local calendar day depends on a per-school timezone Postgres cannot
+    resolve inside a single-table expression index."""
+
     __tablename__ = "check_ins"
-    __table_args__ = (Index("ix_checkins_school_submitted", "school_id", "submitted_at"),)
+    __table_args__ = (
+        Index("ix_checkins_school_submitted", "school_id", "submitted_at"),
+        UniqueConstraint(
+            "student_id", "local_date", name="uq_checkins_student_local_date"
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     student_id: Mapped[uuid.UUID] = mapped_column(
@@ -49,6 +66,7 @@ class CheckIn(Base):
     submitted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    local_date: Mapped[date] = mapped_column(Date, nullable=False)
 
 
 class Activity(Base):

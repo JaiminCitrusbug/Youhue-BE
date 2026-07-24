@@ -6,7 +6,7 @@ INFRA-02 (`8ab7f8057e0a`) — FR-04-01 is its first WRITER (`create_checkin` bel
 reflection" school setting.
 """
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -73,13 +73,21 @@ def create_checkin(
     mood_value: int,
     reflection_text: str | None,
     within_window: bool,
+    local_date: date,
 ) -> CheckIn:
+    """`local_date` (school-LOCAL calendar day, caller-computed) backs
+    `uq_checkins_student_local_date` — the DB-level backstop for "one check-in per student per day"
+    (FR-04-01 review remediation, Finding 1: the read-then-write check alone loses a genuine
+    concurrent race). The caller (`submit_checkin`) is responsible for catching the resulting
+    `IntegrityError` on a concurrent duplicate and translating it to the same 409 the sequential
+    duplicate path already returns."""
     row = CheckIn(
         student_id=student_id,
         school_id=school_id,
         mood_value=mood_value,
         reflection_text=reflection_text,
         within_window=within_window,
+        local_date=local_date,
     )
     db.add(row)
     db.flush()

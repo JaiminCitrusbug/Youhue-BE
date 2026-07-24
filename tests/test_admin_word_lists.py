@@ -33,14 +33,18 @@ def _complete_signin(client, monkeypatch, email="admin@youhue.app", password="Pa
     ).json()["admin_session"]
 
 
-def _mk_checkin(db, student, school, reflection):
+def _mk_checkin(db, student, school, reflection, when=None):
     from datetime import UTC, datetime
 
     from src.domain.checkin.models import CheckIn
 
+    # `local_date` backs `uq_checkins_student_local_date` (FR-04-01 review remediation) — derived
+    # from `when` (or "now") so two fixtures for the same student on different `when` days never
+    # collide.
+    at = when or datetime.now(UTC)
     c = CheckIn(
         student_id=student.id, school_id=school.id, mood_value=3,
-        reflection_text=reflection, submitted_at=datetime.now(UTC),
+        reflection_text=reflection, submitted_at=at, local_date=at.date(),
     )
     db.add(c)
     db.commit()
@@ -184,8 +188,15 @@ def test_school_override_unaffected_by_default_change(db, make_admin, make_schoo
     assert override.words == ["banana"]
     assert override.is_default is False
     # and the school continues to score against ITS override, not the new default
+    from datetime import UTC, datetime, timedelta
+
     student = make_student(school)
-    assert risk.score_checkin(db, _mk_checkin(db, student, school, "a banana")).flagged
+    # two distinct days — this scenario doesn't care about the date, but two rows for the same
+    # student on the same day would collide with uq_checkins_student_local_date (FR-04-01 review
+    # remediation).
+    assert risk.score_checkin(
+        db, _mk_checkin(db, student, school, "a banana", when=datetime.now(UTC) - timedelta(days=1))
+    ).flagged
     assert not risk.score_checkin(db, _mk_checkin(db, student, school, "a mango")).flagged
 
 

@@ -29,6 +29,7 @@ from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from config.env_config import settings
@@ -180,6 +181,18 @@ def submit_checkin(
     mood or reflection — a genuinely new choice, not a retry) is a hard 409: "one check-in per
     student per day" is a domain invariant, not merely a replay-safety concern, so a deliberate
     second submission with different content is rejected, not silently overwritten.
+
+    Concurrency (FR-04-01 review remediation, `docs/reviews/FR-04-01.md` Finding 1 — Blocker): the
+    SELECT-then-INSERT below is what the sequential tests exercise, but it cannot see a genuinely
+    concurrent second request that reads "no row yet" before either has written — the review
+    reproduced two `CheckIn` rows for one student/day in 8/10 trials against the real per-request
+    session pool. The DB-level backstop is `uq_checkins_student_local_date`
+    (`alembic/versions/c4d8f2a91b7e_*`, on `(student_id, local_date)` — `local_date` is this same
+    school-local day, persisted at write time because Postgres cannot resolve a per-school timezone
+    inside a single-table expression index). Follows the FR-02-01/FR-03-01 shape (unique constraint
+    + `IntegrityError` -> reject the loser with the SAME 409 the sequential path returns) rather
+    than FR-19-02's upsert+converge shape: a check-in's content is a student's deliberate choice, so
+    a genuine duplicate should be hard-rejected, not silently merged onto whichever row won.
     """
     try:
         require_within_access_window(db, student.school_id)
@@ -248,14 +261,28 @@ def submit_checkin(
         )
         raise HTTPException(status.HTTP_409_CONFLICT, _ALREADY_CHECKED_IN)
 
-    row = checkin_db.create_checkin(
-        db,
-        student_id=student.id,
-        school_id=student.school_id,
-        mood_value=mood_value,
-        reflection_text=reflection_text,
-        within_window=True,  # only reachable because require_within_access_window returned None
-    )
+    try:
+        row = checkin_db.create_checkin(
+            db,
+            student_id=student.id,
+            school_id=student.school_id,
+            mood_value=mood_value,
+            reflection_text=reflection_text,
+            within_window=True,  # only reachable because require_within_access_window returned None
+            local_date=day_start.date(),
+        )
+    except IntegrityError as exc:
+        # A genuinely concurrent second request for the same student/day won the race to
+        # uq_checkins_student_local_date — the SELECT above ran before either request had written,
+        # so both reached this INSERT. The DB constraint is the guarantee the read-then-write check
+        # cannot provide under real concurrency (review Finding 1); reject the loser with the SAME
+        # 409 the sequential duplicate path returns above, so the race is invisible to the caller.
+        db.rollback()
+        logger.info(
+            "fr_04_01_rejected action=submit_checkin student_id=%s reason=duplicate_day event=race",
+            student.id,
+        )
+        raise HTTPException(status.HTTP_409_CONFLICT, _ALREADY_CHECKED_IN) from exc
     logger.info(
         "fr_04_01_success action=submit_checkin student_id=%s checkin_id=%s", student.id, row.id
     )
