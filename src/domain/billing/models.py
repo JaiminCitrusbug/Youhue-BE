@@ -17,7 +17,10 @@ class Subscription(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     school_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("schools.id"), nullable=False, index=True
+        # FR-19-02 review fix: unique (not just indexed) — at most one Subscription row per
+        # school, ever. DB-level backstop for `get_or_create_subscription`'s upsert (see
+        # `src/domain/billing/services.py`); enforced by migration f4a9c1e7b382.
+        ForeignKey("schools.id"), nullable=False, unique=True, index=True
     )
     tier: Mapped[SubscriptionTier] = mapped_column(
         Enum(SubscriptionTier, name="subscription_tier"),

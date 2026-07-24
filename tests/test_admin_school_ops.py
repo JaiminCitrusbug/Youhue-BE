@@ -9,13 +9,20 @@ Covers @FR-19-02:
 Plus: RBAC deny-cells for `extend_trial`/`update_account` (`manage_accounts`), 404 for an unknown
 school, 422 for a blank support-access reason, and the immutable audit trail's shape.
 """
+import threading
+import time
+
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
 
 import src.application.auth.admin as admin_mod
+from config.env_config import settings
 from src.application.school_admin import services as school_admin_svc
 from src.constants.enums import AdminRole, SchoolStatus, SchoolTier, SubscriptionState
 from src.domain.billing import services as billing_db
+from src.domain.billing.models import Subscription
 from src.domain.compliance.models import AuditLog
 
 ENDPOINT = "/api/v1/admin/schools"
@@ -301,3 +308,88 @@ def test_get_school_detail_no_subscription_yet_is_null_not_error(client, make_ad
     assert body["trial_extension_count"] == 0
     assert body["trial_end_at"] is None
     assert body["subscription_state"] is None
+
+
+# ---- Concurrency regression (fresh-eyes review, docs/reviews/FR-19-02.md Finding 1 / Blocker) --
+#
+# The review proved, with two independent DB sessions racing `extend_trial` on the SAME
+# never-touched school before either committed, that `get_or_create_subscription`'s old
+# select-then-insert let BOTH create a Subscription row — two rows, both "extended once", 200/200.
+# This test reproduces that exact interleaving with two REAL threads (each its own DB connection,
+# its own transaction) — a sequential call could never expose this race, since the bug only exists
+# when a second reader observes "no row yet" before the first writer's insert is committed.
+
+def test_concurrent_first_touch_extend_trial_creates_exactly_one_subscription_row(
+    db, make_admin, make_school
+):
+    """Two admins (or one admin, two tabs, or a client retry) both extend the same never-before
+    -extended school's trial in an overlapping race window. Post-fix: exactly ONE Subscription row
+    is ever created; the race loser's `SELECT ... FOR UPDATE` blocks on the winner's uncommitted
+    insert, then converges onto the SAME row and correctly hits the existing 409 "extension already
+    used" path — it does not create a second row, and it does not silently succeed."""
+    admin = make_admin(role=AdminRole.superadmin)
+    school = make_school()
+    db.commit()  # admin + school must be visible to the two independent sessions below
+
+    engine = create_engine(settings.database_url_test, future=True)
+    SessionForThread = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+    winner_may_start_the_loser = threading.Event()
+    HOLD_OPEN_SECONDS = 0.4  # time the winner keeps its insert uncommitted, forcing the race window
+    outcomes: dict[str, object] = {}
+
+    def winner() -> None:
+        session = SessionForThread()
+        try:
+            school_admin_svc.extend_trial(session, admin, school.id)
+            # The INSERT (and its self-lock) has already happened inside extend_trial above, but
+            # is NOT yet committed — this is the exact uncommitted-overlap window the review's
+            # proof exploited. Signal the loser to start racing into it now.
+            winner_may_start_the_loser.set()
+            time.sleep(HOLD_OPEN_SECONDS)
+            session.commit()
+            outcomes["winner"] = "committed"
+        except Exception as exc:  # pragma: no cover - failure path surfaced via assertion below
+            session.rollback()
+            outcomes["winner"] = exc
+        finally:
+            session.close()
+
+    def loser() -> None:
+        winner_may_start_the_loser.wait(timeout=5)
+        session = SessionForThread()
+        try:
+            # This call's INSERT ... ON CONFLICT DO NOTHING blocks on Postgres's own speculative-
+            # insertion wait until `winner` commits or rolls back — real DB-level concurrency, not
+            # a retry loop.
+            school_admin_svc.extend_trial(session, admin, school.id)
+            session.commit()
+            outcomes["loser"] = "committed"
+        except HTTPException as exc:
+            session.rollback()
+            outcomes["loser"] = exc
+        finally:
+            session.close()
+
+    t_winner = threading.Thread(target=winner)
+    t_loser = threading.Thread(target=loser)
+    t_winner.start()
+    t_loser.start()
+    t_winner.join(timeout=10)
+    t_loser.join(timeout=10)
+
+    assert outcomes.get("winner") == "committed"
+    loser_outcome = outcomes.get("loser")
+    assert isinstance(loser_outcome, HTTPException), (
+        f"expected the race loser to be refused with 409, got: {loser_outcome!r}"
+    )
+    assert loser_outcome.status_code == 409
+    assert "already used" in loser_outcome.detail
+
+    # The core guarantee: the DB actually holds exactly ONE Subscription row for this school —
+    # not two, independently "extended once", as the pre-fix bug produced.
+    rows = db.scalars(select(Subscription).where(Subscription.school_id == school.id)).all()
+    assert len(rows) == 1
+    assert rows[0].trial_extension_count == 1
+
+    engine.dispose()

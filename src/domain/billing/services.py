@@ -10,6 +10,24 @@ confirms `Subscription(` is instantiated nowhere on `main` before this ticket), 
 on its first admin-console trial action, defaulted to the same `trial` state / `free` tier the
 column defaults already declare. When FR-17-01/03 lands a registration-time creator, this stays a
 safe no-op for schools that already have a row.
+
+Race-safety (fresh-eyes review Blocker 1, `docs/reviews/FR-19-02.md` Finding 1): a plain
+select-then-insert let two concurrent first-touch requests both observe "no row yet" and both
+insert one, defeating "one 14-day extension per school, ever." `get_or_create_subscription` is now
+an upsert against the DB-level unique constraint on `subscriptions.school_id` (migration
+f4a9c1e7b382): `INSERT ... ON CONFLICT (school_id) DO NOTHING`, which Postgres itself blocks on if a
+concurrent transaction is mid-insert of the same school's row (speculative-insertion wait — not a
+busy retry), followed by a `SELECT ... FOR UPDATE` that returns the single row EITHER WAY (ours, or
+the winner's) already locked for the rest of the caller's transaction. That lock is what also closes
+the second race the row-uniqueness fix alone would not: two concurrent callers both reading
+`trial_extension_count == 0` off the *same, already-existing* row before either commits. The second
+caller's `SELECT ... FOR UPDATE` blocks until the first commits, then observes the post-commit
+`trial_extension_count == 1` — so it hits `extend_trial`'s existing 409 branch instead of a lost
+update. Chosen over a bare `SELECT ... FOR UPDATE` (which cannot create the first row race-safely
+without the constraint doing double duty as the conflict target) and over FR-02-01's
+insert-then-catch-`IntegrityError` pattern (that fits a reject-the-loser flow; here the loser must
+transparently CONVERGE onto the one true row, not be told to retry) — this upsert+lock combo does
+both in one round trip and is real for both the just-created and the already-existed path.
 """
 import uuid
 from datetime import datetime
@@ -153,14 +171,14 @@ def get_subscription(db: Session, school_id: uuid.UUID) -> Subscription | None:
 
 
 def get_or_create_subscription(db: Session, school_id: uuid.UUID) -> Subscription:
-    """Lazily create the school's Subscription row on first touch (see module docstring).
+    """Lazily create the school's Subscription row on first touch — race-safe upsert against the
+    unique constraint on `school_id` (see module docstring). Always returns the row locked
+    (`SELECT ... FOR UPDATE`) for the remainder of the caller's transaction.
 
-    Race-safe (FR-19-02 review Blocker fix, commit 41f79da): INSERT .. ON CONFLICT DO NOTHING then
-    SELECT .. FOR UPDATE, so two concurrent first-touches converge on the same row instead of
-    racing past a select-then-insert check. Relies on the UNIQUE constraint on
-    ``subscriptions.school_id`` added by migration f4a9c1e7b382 — the same constraint that also
-    backstops FR-02-02's ``arm_trial_subscription`` above (which itself is safe by transaction
-    locking, not by this constraint, but the constraint now protects it too as a second layer)."""
+    Relies on the UNIQUE constraint on ``subscriptions.school_id`` added by migration
+    f4a9c1e7b382 — the same constraint that also backstops FR-02-02's ``arm_trial_subscription``
+    above (which itself is safe by transaction locking, not by this constraint, but the constraint
+    now protects it too as a second layer)."""
     db.execute(
         pg_insert(Subscription)
         .values(school_id=school_id)
