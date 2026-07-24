@@ -14,7 +14,7 @@ including FR-02-02's school-approval first-writer (a sibling lane on a separate 
 this ticket's `extend_trial` path.
 
 Revision ID: f4a9c1e7b382
-Revises: e5c7a1d9f204
+Revises: f20606a1b2c3
 Create Date: 2026-07-24 09:00:00.000000
 
 """
@@ -24,7 +24,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "f4a9c1e7b382"
-down_revision: Union[str, None] = "e5c7a1d9f204"
+down_revision: Union[str, None] = "f20606a1b2c3"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
