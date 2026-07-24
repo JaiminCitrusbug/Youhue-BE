@@ -44,6 +44,31 @@ CSV-injection safety: any stored text cell (``display_name`` / ``external_ref``)
 spreadsheet that later opens an export of this data never executes it as a formula.
 
 Structured logs: ``fr_03_01_success`` / ``_rejected`` / ``_forbidden`` / ``_error``.
+
+---
+
+FR-03-05 — re-import reconciliation (``reconcile_roster`` below) REUSES this entire validation
+pipeline (steps 1-7 above: authorization, file type, size, content scan, CSV structure, row count,
+per-row validation) via the shared ``_validate_upload`` helper — it does not reimplement any of
+FR-03-01's parsing/validation. The only NEW logic FR-03-05 adds is the reconciliation itself (step
+8 below, replacing FR-03-01's plain upsert-only write):
+
+  * a row whose ``external_ref`` matches an existing ACTIVE student -> stays active
+    (``stayers_active``)
+  * a row whose ``external_ref`` matches an existing INACTIVE (previously-deactivated leaver)
+    student -> reactivated as active; counted with the new arrivals (``new_added``) since a
+    deactivated student is, by construction, no longer part of "the previous roster" this endpoint
+    reconciles against — documented interpretation, not in the ticket's literal three scenarios,
+    logged here rather than silently decided
+  * a row with no matching existing student (new ``external_ref``, or no ``external_ref`` at all —
+    same always-CREATE residual as FR-03-01) -> created active (``new_added``)
+  * an existing ACTIVE student carrying an ``external_ref`` that is absent from this upload ->
+    marked inactive, row retained, never deleted (``leavers_deactivated``)
+  * an existing student with NO ``external_ref`` at all cannot be matched across two uploads (no
+    natural key — the same documented FR-03-01 residual) and is therefore left untouched by
+    reconciliation, never auto-deactivated purely for lacking a key
+
+Structured logs: ``fr_03_05_success`` / ``_rejected`` / ``_forbidden`` / ``_error``.
 """
 import csv
 import io
@@ -60,7 +85,12 @@ from src.application.isolation import services as isolation
 from src.constants.enums import StaffRole, StudentAgeBand, StudentStatus
 from src.domain.identity import services as identity_db
 from src.domain.identity.models import StaffAccount
-from src.schemas.roster import RosterImportResponse
+from src.schemas.roster import (
+    RosterImportResponse,
+    RosterListResponse,
+    RosterReconcileResponse,
+    RosterStudentOut,
+)
 from src.utils import file_scan
 
 logger = logging.getLogger("youhue.roster")
@@ -114,17 +144,21 @@ def _age_from_grade(grade: str) -> int | None:
     return _GRADE_TO_AGE.get(grade.strip().lower())
 
 
-def _authorize(staff: StaffAccount, school_id: uuid.UUID) -> None:
+def _authorize(staff: StaffAccount, school_id: uuid.UUID, *, log_prefix: str = "fr_03_01") -> None:
+    """Shared role + same-school gate for every roster surface (import, reconcile, list) — SAME
+    check, only the structured-log prefix differs per ticket (``fr_03_01_forbidden`` vs
+    ``fr_03_05_forbidden``)."""
     try:
         authz.require_roles(staff, StaffRole.teacher, StaffRole.support)
     except HTTPException:
         logger.warning(
-            "fr_03_01_forbidden reason=role actor_id=%s role=%s", staff.id, staff.role.value
+            "%s_forbidden reason=role actor_id=%s role=%s", log_prefix, staff.id, staff.role.value
         )
         raise
     if staff.school_id != school_id:
         logger.warning(
-            "fr_03_01_forbidden reason=cross_school actor_id=%s school_id=%s", staff.id, school_id
+            "%s_forbidden reason=cross_school actor_id=%s school_id=%s",
+            log_prefix, staff.id, school_id,
         )
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")
 
@@ -202,21 +236,18 @@ def _validate_rows(rows: list[dict[str, str]]) -> tuple[list[_ParsedRow], list[d
     return parsed, errors
 
 
-def import_roster(
-    db: Session,
-    staff: StaffAccount,
-    school_id: uuid.UUID,
-    *,
-    filename: str,
-    content_type: str | None,
-    raw: bytes,
-) -> RosterImportResponse:
-    _authorize(staff, school_id)
-
+def _validate_upload(
+    school_id: uuid.UUID, filename: str, content_type: str | None, raw: bytes, *, log_prefix: str
+) -> list[_ParsedRow]:
+    """Steps 2-7 of the validation order documented at module top (file type -> size -> content
+    scan -> CSV structure -> row count -> per-row validation). SHARED by ``import_roster``
+    (FR-03-01) and ``reconcile_roster`` (FR-03-05) so the reconcile endpoint reuses the exact same
+    parsing/validation pipeline instead of reimplementing it — only the structured-log prefix
+    differs between the two callers."""
     try:
         file_scan.check_file_type(filename, content_type)
     except file_scan.UnsupportedFileTypeError as exc:
-        logger.info("fr_03_01_rejected reason=unsupported_type school_id=%s", school_id)
+        logger.info("%s_rejected reason=unsupported_type school_id=%s", log_prefix, school_id)
         raise HTTPException(
             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail={
@@ -228,7 +259,7 @@ def import_roster(
     try:
         file_scan.check_size(raw, settings.roster_import_max_bytes)
     except file_scan.FileTooLargeError as exc:
-        logger.info("fr_03_01_rejected reason=too_large school_id=%s", school_id)
+        logger.info("%s_rejected reason=too_large school_id=%s", log_prefix, school_id)
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail={
@@ -242,7 +273,7 @@ def import_roster(
     try:
         text = file_scan.scan_and_decode(raw)
     except file_scan.FailedScanError as exc:
-        logger.info("fr_03_01_rejected reason=failed_scan school_id=%s", school_id)
+        logger.info("%s_rejected reason=failed_scan school_id=%s", log_prefix, school_id)
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             detail={"code": "failed_scan", "message": str(exc)},
@@ -250,7 +281,7 @@ def import_roster(
 
     rows, structural_errors = _parse_csv(text)
     if structural_errors:
-        logger.info("fr_03_01_rejected reason=malformed_structure school_id=%s", school_id)
+        logger.info("%s_rejected reason=malformed_structure school_id=%s", log_prefix, school_id)
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
@@ -261,7 +292,7 @@ def import_roster(
         )
 
     if len(rows) > settings.roster_import_max_rows:
-        logger.info("fr_03_01_rejected reason=too_many_rows school_id=%s", school_id)
+        logger.info("%s_rejected reason=too_many_rows school_id=%s", log_prefix, school_id)
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail={
@@ -275,8 +306,8 @@ def import_roster(
     parsed, row_errors = _validate_rows(rows)
     if row_errors:
         logger.info(
-            "fr_03_01_rejected reason=malformed_rows school_id=%s count=%d",
-            school_id, len(row_errors),
+            "%s_rejected reason=malformed_rows school_id=%s count=%d",
+            log_prefix, school_id, len(row_errors),
         )
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -286,6 +317,20 @@ def import_roster(
                 "errors": row_errors,
             },
         )
+    return parsed
+
+
+def import_roster(
+    db: Session,
+    staff: StaffAccount,
+    school_id: uuid.UUID,
+    *,
+    filename: str,
+    content_type: str | None,
+    raw: bytes,
+) -> RosterImportResponse:
+    _authorize(staff, school_id, log_prefix="fr_03_01")
+    parsed = _validate_upload(school_id, filename, content_type, raw, log_prefix="fr_03_01")
 
     imported = 0
     banded = 0
@@ -319,3 +364,104 @@ def import_roster(
         school_id, staff.id, imported, banded,
     )
     return RosterImportResponse(imported=imported, banded=banded)
+
+
+def reconcile_roster(
+    db: Session,
+    staff: StaffAccount,
+    school_id: uuid.UUID,
+    *,
+    filename: str,
+    content_type: str | None,
+    raw: bytes,
+) -> RosterReconcileResponse:
+    """FR-03-05 — re-import reconciliation (SC-037). Same auth/validation pipeline as
+    ``import_roster`` (REUSED via ``_authorize`` / ``_validate_upload``, not reimplemented); the
+    only new logic is the three-way reconciliation itself:
+
+      * matched to an ACTIVE student (by ``external_ref``)   -> stays active   (``stayers_active``)
+      * matched to an INACTIVE student (a former leaver)      -> reactivated    (``new_added``)
+      * no match (new ref, or no ref at all)                  -> created active (``new_added``)
+      * an ACTIVE student whose ``external_ref`` is absent from this upload -> deactivated, row
+        retained (``leavers_deactivated``) — never deleted, per the ticket's hard rule.
+
+    One ACID transaction (the router commits once); idempotent on retry [BR-05] — retrying the
+    identical file re-derives the same live-roster state (a stayer stays a stayer, an
+    already-deactivated leaver is simply not re-touched, a previously-created new row is now found
+    and treated as a stayer) rather than duplicating or re-deleting anything.
+    """
+    _authorize(staff, school_id, log_prefix="fr_03_05")
+    parsed = _validate_upload(school_id, filename, content_type, raw, log_prefix="fr_03_05")
+
+    upload_refs = {row.external_ref for row in parsed if row.external_ref}
+
+    stayers_active = 0
+    new_added = 0
+    for row in parsed:
+        existing = (
+            identity_db.get_student_by_external_ref(db, school_id, row.external_ref)
+            if row.external_ref
+            else None
+        )
+        if existing is not None:
+            existing.display_name = row.display_name
+            existing.age_band = row.age_band
+            if existing.status == StudentStatus.active:
+                stayers_active += 1
+            else:
+                # A previously-deactivated leaver reappearing in the new upload: reactivate and
+                # count with the new arrivals (see module docstring — documented interpretation).
+                new_added += 1
+            existing.status = StudentStatus.active
+        else:
+            identity_db.create_student(
+                db,
+                school_id=school_id,
+                display_name=row.display_name,
+                age_band=row.age_band,
+                status=StudentStatus.active,
+                external_ref=row.external_ref,
+            )
+            new_added += 1
+
+    leavers = identity_db.list_active_students_with_external_ref_outside(
+        db, school_id, upload_refs
+    )
+    for leaver in leavers:
+        leaver.status = StudentStatus.inactive  # deactivated only — row and history retained
+    leavers_deactivated = len(leavers)
+
+    isolation.audit(
+        db, actor_id=staff.id, action="roster.reconciled", target=str(school_id),
+        school_id=school_id,
+    )
+    logger.info(
+        "fr_03_05_success school_id=%s actor_id=%s stayers_active=%d leavers_deactivated=%d "
+        "new_added=%d",
+        school_id, staff.id, stayers_active, leavers_deactivated, new_added,
+    )
+    return RosterReconcileResponse(
+        stayers_active=stayers_active,
+        leavers_deactivated=leavers_deactivated,
+        new_added=new_added,
+    )
+
+
+def list_roster(db: Session, staff: StaffAccount, school_id: uuid.UUID) -> RosterListResponse:
+    """FR-03-05 SC-037 — the roster list view backing the re-import screen. Read-only, same
+    staff-only/same-school gate as import/reconcile; every student at the school regardless of
+    status, so a deactivated leaver's row is still visible (tagged inactive), never hidden."""
+    _authorize(staff, school_id, log_prefix="fr_03_05")
+    students = identity_db.list_students_in_school(db, school_id)
+    return RosterListResponse(
+        students=[
+            RosterStudentOut(
+                id=s.id,
+                display_name=s.display_name,
+                age_band=s.age_band.value,
+                status=s.status.value,
+                external_ref=s.external_ref,
+            )
+            for s in students
+        ]
+    )

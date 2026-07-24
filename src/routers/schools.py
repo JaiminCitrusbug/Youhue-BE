@@ -25,6 +25,8 @@ from src.infrastructure.middlewares.ratelimit import rate_limit_registration
 from src.schemas.roster import (
     RosterErrorResponse,
     RosterImportResponse,
+    RosterListResponse,
+    RosterReconcileResponse,
     RosterRowErrorResponse,
 )
 from src.schemas.schools import (
@@ -213,5 +215,86 @@ def import_roster(
         db.rollback()
         logger.exception("fr_03_01_error")
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Import failed") from exc
+    db.commit()
+    return result
+
+
+# --- FR-03-05: re-import reconciliation + roster list (SC-037) ----------------------------------
+
+
+@router.get(
+    "/{school_id}/roster",
+    response_model=RosterListResponse,
+    responses={
+        status.HTTP_403_FORBIDDEN: {
+            "model": ErrorResponse,
+            "description": "Caller is not school staff, or belongs to a different school.",
+        },
+    },
+)
+def get_roster(school_id: uuid.UUID, staff: StaffDep, db: DbDep) -> RosterListResponse:
+    """SC-037 roster list view: every student at the school (any status). Read-only."""
+    return roster_svc.list_roster(db, staff, school_id)
+
+
+@router.post(
+    "/{school_id}/roster/reconcile",
+    response_model=RosterReconcileResponse,
+    responses={
+        status.HTTP_400_BAD_REQUEST: {
+            "model": RosterErrorResponse,
+            "description": "The file failed the content scan (empty / binary / not UTF-8 text).",
+        },
+        status.HTTP_403_FORBIDDEN: {
+            "model": ErrorResponse,
+            "description": "Caller is not school staff, or belongs to a different school.",
+        },
+        status.HTTP_413_REQUEST_ENTITY_TOO_LARGE: {
+            "model": RosterErrorResponse,
+            "description": "The file (or its row count) exceeds the configured cap.",
+        },
+        status.HTTP_415_UNSUPPORTED_MEDIA_TYPE: {
+            "model": RosterErrorResponse,
+            "description": "The file type is not accepted — the TRUE reason is named, never a "
+            "generic error.",
+        },
+        status.HTTP_422_UNPROCESSABLE_ENTITY: {
+            "model": RosterRowErrorResponse,
+            "description": "The CSV structure or one or more rows could not be imported.",
+        },
+        status.HTTP_500_INTERNAL_SERVER_ERROR: {
+            "model": ErrorResponse,
+            "description": "Reconciliation failed; nothing was written.",
+        },
+    },
+)
+def reconcile_roster(
+    school_id: uuid.UUID,
+    staff: StaffDep,
+    db: DbDep,
+    file: UploadFile = File(...),
+) -> RosterReconcileResponse:
+    """Staff-only, same-school-only CSV roster re-import + reconciliation (SC-037). Reuses
+    FR-03-01's validation pipeline in full (``src.application.roster.services._validate_upload``);
+    the reconciliation write (stayers stay active, absent leavers deactivated — never deleted, new
+    rows added active) is the only new logic. One ACID transaction: commit only on full success,
+    roll back on any rejection or error — no partial reconciliation is ever left half-applied."""
+    raw = file.file.read()
+    try:
+        result = roster_svc.reconcile_roster(
+            db,
+            staff,
+            school_id,
+            filename=file.filename or "",
+            content_type=file.content_type,
+            raw=raw,
+        )
+    except HTTPException:
+        db.rollback()  # no partial reconciliation survives a rejected/forbidden/malformed upload
+        raise
+    except Exception as exc:  # noqa: BLE001 — last-resort guard: never leak a partial write
+        db.rollback()
+        logger.exception("fr_03_05_error")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Reconciliation failed") from exc
     db.commit()
     return result

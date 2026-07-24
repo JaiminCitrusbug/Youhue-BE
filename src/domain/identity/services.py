@@ -255,6 +255,51 @@ def get_student_by_external_ref(
     )
 
 
+def list_students_in_school(db: Session, school_id: uuid.UUID) -> list[Student]:
+    """FR-03-05 SC-037 roster list view: every student at a school, any status (active AND
+    inactive/deactivated leavers are both shown — the screen must be able to display a leaver's
+    'Inactive' tag, never hide the row). Name order for a stable, scannable staff-facing list."""
+    return list(
+        db.scalars(
+            select(Student)
+            .where(Student.school_id == school_id)
+            .order_by(Student.display_name.asc())
+        )
+    )
+
+
+def list_active_students_with_external_ref_outside(
+    db: Session, school_id: uuid.UUID, keep_refs: set[str]
+) -> list[Student]:
+    """FR-03-05 reconciliation: every currently-ACTIVE student at this school who carries an
+    ``external_ref`` NOT present in ``keep_refs`` (the set of external_refs seen in the freshly
+    uploaded roster) — these are the leavers to deactivate. Deliberately scoped to
+    ``external_ref IS NOT NULL``: a student with no natural key can never be reliably matched
+    across two uploads (the same documented residual as ``get_student_by_external_ref``'s
+    always-CREATE no-ref row), so a no-ref row is left untouched by reconciliation rather than
+    being deactivated on every re-import purely because it can't be matched."""
+    if not keep_refs:
+        return list(
+            db.scalars(
+                select(Student).where(
+                    Student.school_id == school_id,
+                    Student.status == StudentStatus.active,
+                    Student.external_ref.is_not(None),
+                )
+            )
+        )
+    return list(
+        db.scalars(
+            select(Student).where(
+                Student.school_id == school_id,
+                Student.status == StudentStatus.active,
+                Student.external_ref.is_not(None),
+                Student.external_ref.not_in(keep_refs),
+            )
+        )
+    )
+
+
 def create_student(
     db: Session,
     *,
