@@ -63,6 +63,28 @@ def get_active_staff_by_email_in_school(
     )
 
 
+def list_staff_in_school(db: Session, school_id: uuid.UUID) -> list[StaffAccount]:
+    """Every staff account at a school, any status (FR-16-02 SC-057 staff-management list) —
+    oldest-first so the leadership view is stable across reloads."""
+    return list(
+        db.scalars(
+            select(StaffAccount)
+            .where(StaffAccount.school_id == school_id)
+            .order_by(StaffAccount.created_at.asc())
+        )
+    )
+
+
+def get_staff_in_school(
+    db: Session, school_id: uuid.UUID, staff_id: uuid.UUID
+) -> StaffAccount | None:
+    """A staff account, scoped to one school (FR-16-02 same-school-only) — never returns a row
+    belonging to a different tenant, whatever ``staff_id`` is passed."""
+    return db.scalar(
+        select(StaffAccount).where(StaffAccount.id == staff_id, StaffAccount.school_id == school_id)
+    )
+
+
 def get_active_school_by_code(db: Session, code: str) -> School | None:
     return db.scalar(
         select(School).where(School.sign_in_code == code, School.status == SchoolStatus.active)

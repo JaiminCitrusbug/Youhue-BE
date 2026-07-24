@@ -1,13 +1,14 @@
 """Org domain services — class-access / membership queries only."""
 import uuid
 from collections.abc import Sequence
+from datetime import time
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.constants.enums import SchoolStatus, StaffClassScope
 from src.domain.identity.models import School
-from src.domain.org.models import ClassGroup, ClassMembership, StaffClassAccess
+from src.domain.org.models import CalendarConfig, ClassGroup, ClassMembership, StaffClassAccess
 
 
 def get_class_ids_for_staff_in_school(
@@ -73,3 +74,29 @@ def set_class_access(
     klass.qr_token = qr_token
     db.flush()
     return klass
+
+
+def get_calendar_config(db: Session, school_id: uuid.UUID) -> CalendarConfig | None:
+    """A school's access-window config (FR-16-02 SC-063), if one has been saved yet."""
+    return db.scalar(select(CalendarConfig).where(CalendarConfig.school_id == school_id))
+
+
+def set_calendar_config(
+    db: Session, school_id: uuid.UUID, window_start: time, window_end: time, timezone: str
+) -> CalendarConfig:
+    """Upsert a school's access-window config (FR-16-02, leadership-owned). This ticket stores
+    ONLY start/end/timezone — window ENFORCEMENT and calendar-period resolution is
+    FR-07-03/FR-07-04 (out of this ticket's scope). ``holidays`` is left untouched here; no
+    leadership surface for it exists yet. Caller commits."""
+    row = get_calendar_config(db, school_id)
+    if row is None:
+        row = CalendarConfig(
+            school_id=school_id, window_start=window_start, window_end=window_end, timezone=timezone
+        )
+        db.add(row)
+    else:
+        row.window_start = window_start
+        row.window_end = window_end
+        row.timezone = timezone
+    db.flush()
+    return row
