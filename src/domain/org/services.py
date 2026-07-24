@@ -1,7 +1,7 @@
 """Org domain services — class-access / membership queries only."""
 import uuid
 from collections.abc import Sequence
-from datetime import time
+from datetime import date, time
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -82,21 +82,36 @@ def get_calendar_config(db: Session, school_id: uuid.UUID) -> CalendarConfig | N
 
 
 def set_calendar_config(
-    db: Session, school_id: uuid.UUID, window_start: time, window_end: time, timezone: str
+    db: Session,
+    school_id: uuid.UUID,
+    window_start: time,
+    window_end: time,
+    timezone: str,
+    term_start: date | None = None,
+    term_end: date | None = None,
 ) -> CalendarConfig:
-    """Upsert a school's access-window config (FR-16-02, leadership-owned). This ticket stores
-    ONLY start/end/timezone — window ENFORCEMENT and calendar-period resolution is
-    FR-07-03/FR-07-04 (out of this ticket's scope). ``holidays`` is left untouched here; no
-    leadership surface for it exists yet. Caller commits."""
+    """Upsert a school's access-window + term-dates config (FR-16-02 window/tz; FR-07-04 added the
+    minimal term_start/term_end pair to this SAME row). ``term_start``/``term_end`` are OPTIONAL —
+    when the caller omits them (not part of this save), any previously-saved term dates are left
+    untouched, same as ``holidays`` today (no leadership surface to clear either yet). Caller
+    commits."""
     row = get_calendar_config(db, school_id)
     if row is None:
         row = CalendarConfig(
-            school_id=school_id, window_start=window_start, window_end=window_end, timezone=timezone
+            school_id=school_id,
+            window_start=window_start,
+            window_end=window_end,
+            timezone=timezone,
+            term_start=term_start,
+            term_end=term_end,
         )
         db.add(row)
     else:
         row.window_start = window_start
         row.window_end = window_end
         row.timezone = timezone
+        if term_start is not None and term_end is not None:
+            row.term_start = term_start
+            row.term_end = term_end
     db.flush()
     return row

@@ -154,6 +154,8 @@ def _snapshot(db: Session, school_id: uuid.UUID) -> SchoolSettingsOut:
                 window_start=window_row.window_start,
                 window_end=window_row.window_end,
                 timezone=window_row.timezone,
+                term_start=window_row.term_start,
+                term_end=window_row.term_end,
             )
             if window_row is not None
             else None
@@ -277,6 +279,25 @@ def _apply_access_window(
         )
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown timezone") from exc
 
+    # FR-07-04: term_start/term_end are optional and paired (schema-enforced); when both are
+    # given, term_start must precede term_end — a school's term cannot end before it starts.
+    if (
+        window.term_start is not None
+        and window.term_end is not None
+        and window.term_start >= window.term_end
+    ):
+        logger.warning(
+            "fr_16_02_rejected action=update_settings setting=access_window actor_id=%s "
+            "reason=bad_term_range", actor.id,
+        )
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Term start must be before end")
+
     org_db.set_calendar_config(
-        db, school_id, window.window_start, window.window_end, window.timezone
+        db,
+        school_id,
+        window.window_start,
+        window.window_end,
+        window.timezone,
+        term_start=window.term_start,
+        term_end=window.term_end,
     )

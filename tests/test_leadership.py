@@ -299,7 +299,10 @@ def test_update_access_window_persists(client, db, make_school, make_staff):
     r = client.patch(_settings_url(school.id), json=body, headers=_auth(token))
     assert r.status_code == 200
     window = r.json()["settings"]["access_window"]
-    assert window == {"window_start": "08:30:00", "window_end": "09:30:00", "timezone": "Europe/London"}
+    assert window == {
+        "window_start": "08:30:00", "window_end": "09:30:00", "timezone": "Europe/London",
+        "term_start": None, "term_end": None,
+    }
 
     row = db.query(CalendarConfig).filter(CalendarConfig.school_id == school.id).one()
     assert row.timezone == "Europe/London"
@@ -309,6 +312,71 @@ def test_update_access_window_start_after_end_is_422(client, db, make_school, ma
     school, leader, token = _leader(db, make_school, make_staff, code="SET-8")
     body = {
         "access_window": {"window_start": "10:00", "window_end": "09:00", "timezone": "UTC"}
+    }
+    r = client.patch(_settings_url(school.id), json=body, headers=_auth(token))
+    assert r.status_code == 422
+
+
+def test_update_access_window_with_term_dates_persists_both(client, db, make_school, make_staff):
+    """FR-07-04: the minimal term-dates surface added to the SAME CalendarConfig row/setting."""
+    school, leader, token = _leader(db, make_school, make_staff, code="SET-7B")
+    body = {
+        "access_window": {
+            "window_start": "08:30", "window_end": "09:30", "timezone": "Europe/London",
+            "term_start": "2026-09-01", "term_end": "2026-12-18",
+        }
+    }
+    r = client.patch(_settings_url(school.id), json=body, headers=_auth(token))
+    assert r.status_code == 200
+    window = r.json()["settings"]["access_window"]
+    assert window["term_start"] == "2026-09-01"
+    assert window["term_end"] == "2026-12-18"
+
+    row = db.query(CalendarConfig).filter(CalendarConfig.school_id == school.id).one()
+    assert str(row.term_start) == "2026-09-01"
+    assert str(row.term_end) == "2026-12-18"
+
+
+def test_update_access_window_omitting_term_dates_leaves_them_unchanged(
+    client, db, make_school, make_staff
+):
+    school, leader, token = _leader(db, make_school, make_staff, code="SET-7C")
+    first = {
+        "access_window": {
+            "window_start": "08:30", "window_end": "09:30", "timezone": "UTC",
+            "term_start": "2026-09-01", "term_end": "2026-12-18",
+        }
+    }
+    client.patch(_settings_url(school.id), json=first, headers=_auth(token))
+
+    # A later save that only touches window/timezone must not silently erase the saved term dates.
+    second = {"access_window": {"window_start": "08:00", "window_end": "09:00", "timezone": "UTC"}}
+    r = client.patch(_settings_url(school.id), json=second, headers=_auth(token))
+    assert r.status_code == 200
+    window = r.json()["settings"]["access_window"]
+    assert window["term_start"] == "2026-09-01"
+    assert window["term_end"] == "2026-12-18"
+
+
+def test_update_access_window_term_start_after_end_is_422(client, db, make_school, make_staff):
+    school, leader, token = _leader(db, make_school, make_staff, code="SET-7D")
+    body = {
+        "access_window": {
+            "window_start": "08:30", "window_end": "09:30", "timezone": "UTC",
+            "term_start": "2026-12-18", "term_end": "2026-09-01",
+        }
+    }
+    r = client.patch(_settings_url(school.id), json=body, headers=_auth(token))
+    assert r.status_code == 422
+
+
+def test_update_access_window_one_sided_term_dates_is_422(client, db, make_school, make_staff):
+    school, leader, token = _leader(db, make_school, make_staff, code="SET-7E")
+    body = {
+        "access_window": {
+            "window_start": "08:30", "window_end": "09:30", "timezone": "UTC",
+            "term_start": "2026-09-01",
+        }
     }
     r = client.patch(_settings_url(school.id), json=body, headers=_auth(token))
     assert r.status_code == 422

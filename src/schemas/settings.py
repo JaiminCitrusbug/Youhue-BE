@@ -20,7 +20,7 @@ settings, never to build the engines that consume them:
                    ONLY; window ENFORCEMENT + calendar-period resolution is FR-07-03/FR-07-04.
 """
 import uuid
-from datetime import time
+from datetime import date, time
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -60,6 +60,18 @@ class AccessWindowSetting(BaseModel):
     window_start: time
     window_end: time
     timezone: str
+    # FR-07-04: minimal term-dates surface on the SAME setting/row FR-16-02 already owns. OPTIONAL
+    # and paired — omit both to leave any previously-saved term dates untouched (this save is only
+    # about window/timezone); provide both together to set/replace them. One-without-the-other is
+    # rejected below (422), never a silent partial write.
+    term_start: date | None = None
+    term_end: date | None = None
+
+    @model_validator(mode="after")
+    def _term_dates_paired(self) -> Self:
+        if (self.term_start is None) != (self.term_end is None):
+            raise ValueError("term_start and term_end must be provided together")
+        return self
 
 
 class SchoolSettingsUpdate(BaseModel):
@@ -100,6 +112,8 @@ class AccessWindowOut(BaseModel):
     window_start: time
     window_end: time
     timezone: str
+    term_start: date | None = None  # FR-07-04 — null until leadership has ever saved a term
+    term_end: date | None = None
 
 
 class SchoolSettingsOut(BaseModel):

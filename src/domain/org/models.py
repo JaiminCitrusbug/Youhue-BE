@@ -86,6 +86,11 @@ class CalendarConfig(Base):
     window_end: Mapped[time] = mapped_column(Time, nullable=False)
     timezone: Mapped[str] = mapped_column(String, nullable=False, default="UTC")
     holidays: Mapped[list[date] | None] = mapped_column(ARRAY(Date), nullable=True)
+    # FR-07-04: minimal term-dates surface added to this SAME table (FR-16-02 covered only
+    # window_start/window_end/timezone; term dates did not exist yet). Both null until leadership
+    # saves a term via the SC-063 settings hub — 'this term' resolution 404s until then.
+    term_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    term_end: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
