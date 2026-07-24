@@ -18,19 +18,28 @@ from src.domain.identity.models import InternalAdmin
 
 class AdminPermission(str, enum.Enum):
     """Representative internal-team capabilities. Real admin features bind to these later:
-    FR-19-02 -> manage_accounts, FR-19-04 -> manage_seed, FR-19-05 -> manage_word_lists,
-    FR-19-07 -> view_statistics; platform_config is superadmin-only platform maintenance."""
+    FR-19-02 -> manage_accounts (+ access_child_data), FR-19-04 -> manage_seed,
+    FR-19-05 -> manage_word_lists, FR-19-07 -> view_statistics; platform_config is
+    superadmin-only platform maintenance."""
 
     manage_accounts = "manage_accounts"
     manage_seed = "manage_seed"
     manage_word_lists = "manage_word_lists"
     view_statistics = "view_statistics"
     platform_config = "platform_config"
+    # FR-19-02 (SC-077): support access to a school's CHILDREN's data. Deliberately its OWN
+    # permission, narrower than `manage_accounts` — account/trial administration and reading a
+    # school's child data are different sensitivities, and the ticket requires this specific
+    # capability to be permission-bound (403 for a role that lacks it), never bundled into general
+    # account management ("not an open backdoor").
+    access_child_data = "access_child_data"
 
 
 # The role -> permission matrix. superadmin has every permission; support is a strict subset
-# (school-support only) — it CANNOT do seed / word-list / platform maintenance. That gap is the
-# deny-cell the RBAC probe route exercises now (FR-19-04 seed maintenance is gated the same way).
+# (school-support only) — it CANNOT do seed / word-list / platform maintenance, and it CANNOT open
+# a school's children's data (`access_child_data` is superadmin-only — the most sensitive admin
+# capability gets the narrowest grant). That gap is the deny-cell the RBAC probe route exercises
+# now (FR-19-04 seed maintenance is gated the same way).
 _ROLE_PERMISSIONS: dict[AdminRole, frozenset[AdminPermission]] = {
     AdminRole.superadmin: frozenset(AdminPermission),
     AdminRole.support: frozenset(

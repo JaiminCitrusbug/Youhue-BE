@@ -126,6 +126,15 @@ def count_students_in_school(db: Session, school_id: uuid.UUID) -> int:
     ) or 0
 
 
+def list_schools(db: Session, name_contains: str | None = None) -> list[School]:
+    """Every school on the platform (FR-19-02 / SC-075), optionally name-filtered. Admin-console
+    only — callers are RBAC-gated by the application layer before reaching this."""
+    stmt = select(School).order_by(School.name)
+    if name_contains:
+        stmt = stmt.where(func.lower(School.name).contains(name_contains.strip().lower()))
+    return list(db.scalars(stmt))
+
+
 def get_school_by_name(db: Session, name: str) -> School | None:
     """A school that already holds this name, case-insensitively — PENDING or APPROVED alike
     (FR-02-01 Scenario 3: a later teacher must not create a duplicate). Mirrors the

@@ -1,17 +1,24 @@
 """Admin console router (FR-19-01) — its own surface (decision #4), separate from staff/student.
 
 Endpoints:
-  POST /api/v1/admin/sign-in            email + password + (email-OTP) MFA -> admin session + role
-  GET  /api/v1/admin/concern-words/default   read the platform default concern-word list (FR-19-05)
-  PUT  /api/v1/admin/concern-words/default   replace it (both `manage_word_lists`-gated)
-  GET  /api/v1/admin/_probe/seed-maintenance
+  POST  /api/v1/admin/sign-in            email + password + (email-OTP) MFA -> admin session + role
+  GET   /api/v1/admin/concern-words/default   read the platform default concern-word list (FR-19-05)
+  PUT   /api/v1/admin/concern-words/default   replace it (both `manage_word_lists`-gated)
+  GET   /api/v1/admin/schools                every school (SC-075, `manage_accounts`-gated)
+  GET   /api/v1/admin/schools/{id}           one school + its trial state (SC-076/077)
+  PATCH /api/v1/admin/schools/{id}           extend_trial | update_account | support_access
+        (FR-19-02) — 200 on success; 409 the school's one trial extension is already used; 403 the
+        actor's role lacks the action's permission (audit-logged); 500 on a persistence failure.
+  GET   /api/v1/admin/_probe/seed-maintenance
         a representative role-gated probe (decision #3) so the NEGATIVE 403 scenario is genuinely
         exercised now: a permitted role -> 200, a limited role -> 403 (audit-logged). Real admin
-        features (FR-19-02/04/05/07) attach to this same RBAC policy layer later.
+        features (FR-19-04/07) attach to this same RBAC policy layer later.
 
 Thin router — business logic lives in src.application.*. Sign-in is generic-error, rate-limited,
 and lockout-protected.
 """
+import logging
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -19,19 +26,28 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from src.application.auth import admin as admin_svc
 from src.application.authz import admin as admin_authz
 from src.application.concern_words import services as concern_words_svc
+from src.application.school_admin import services as school_admin_svc
 from src.constants.enums import SessionKind
-from src.domain.identity.models import InternalAdmin
+from src.domain.billing.models import Subscription
+from src.domain.identity.models import InternalAdmin, School
 from src.infrastructure.middlewares.auth_middleware import DbDep, SessionDep
 from src.infrastructure.middlewares.ratelimit import rate_limit
 from src.schemas.admin import (
+    AdminSchoolAction,
     AdminSignIn,
     AdminSignInResponse,
     DefaultWordListResponse,
     DefaultWordListUpdate,
+    SchoolActionRequest,
+    SchoolActionResponse,
+    SchoolDetail,
+    SchoolListItem,
+    SchoolsListResponse,
 )
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 _throttle = [Depends(rate_limit)]
+logger = logging.getLogger("youhue.admin.schools")
 
 
 def get_current_admin(sess: SessionDep, db: DbDep) -> InternalAdmin:
@@ -99,3 +115,76 @@ def update_default_concern_words(
         raise
     db.commit()
     return DefaultWordListResponse(words=words, count=len(words))
+
+
+def _school_detail(school: School, sub: Subscription | None) -> SchoolDetail:
+    return SchoolDetail(
+        id=school.id,
+        name=school.name,
+        tier=school.tier,
+        status=school.status,
+        timezone=school.timezone,
+        subscription_state=sub.state if sub else None,
+        trial_end_at=sub.trial_end_at if sub else None,
+        trial_extension_count=sub.trial_extension_count if sub else 0,
+    )
+
+
+@router.get("/schools", response_model=SchoolsListResponse)
+def list_schools(admin: AdminDep, db: DbDep, q: str | None = None) -> SchoolsListResponse:
+    """SC-075: every school on the platform, optionally name-filtered. `manage_accounts`-gated."""
+    try:
+        schools = school_admin_svc.list_schools(db, admin, q)
+    except HTTPException:
+        db.commit()  # persist the audit-logged RBAC denial before surfacing the error
+        raise
+    items = [SchoolListItem(id=s.id, name=s.name, tier=s.tier, status=s.status) for s in schools]
+    return SchoolsListResponse(schools=items, count=len(schools))
+
+
+@router.get("/schools/{school_id}", response_model=SchoolDetail)
+def get_school(school_id: uuid.UUID, admin: AdminDep, db: DbDep) -> SchoolDetail:
+    """SC-076/077: one school's account + trial state. `manage_accounts`-gated."""
+    try:
+        school, sub = school_admin_svc.get_school(db, admin, school_id)
+    except HTTPException:
+        db.commit()  # persist the audit-logged RBAC denial (or surface the 404) before raising
+        raise
+    return _school_detail(school, sub)
+
+
+@router.patch("/schools/{school_id}", response_model=SchoolActionResponse)
+def patch_school(
+    school_id: uuid.UUID, body: SchoolActionRequest, admin: AdminDep, db: DbDep
+) -> SchoolActionResponse:
+    """FR-19-02: `extend_trial` (409 once already used) | `update_account` | `support_access`
+    (permission-bound + audit-logged). Each action's own permission gate raises 403 (audit-logged)
+    for a role that lacks it; the router commits before every raise so denial/409/404 rows survive.
+    An unexpected persistence failure is caught and surfaced as 500 (never a raw 500 with no body,
+    never silently swallowed) — the ticket's `500 { error }` case."""
+    sub: Subscription | None
+    try:
+        if body.action == AdminSchoolAction.extend_trial:
+            school, sub = school_admin_svc.extend_trial(db, admin, school_id)
+        elif body.action == AdminSchoolAction.update_account:
+            school, sub = school_admin_svc.update_account(
+                db, admin, school_id,
+                tier=body.tier, account_status=body.status, timezone=body.timezone,
+            )
+        else:
+            school, sub = school_admin_svc.support_access(
+                db, admin, school_id, reason=body.reason
+            )
+    except HTTPException:
+        db.commit()
+        raise
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "fr_19_02_error admin=%s action=%s school=%s", admin.id, body.action, school_id
+        )
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not process the request"
+        ) from None
+    db.commit()
+    return SchoolActionResponse(action=body.action, school=_school_detail(school, sub))
