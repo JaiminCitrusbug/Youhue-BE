@@ -14,8 +14,9 @@ class ParentalConsent(Base):
     __tablename__ = "parental_consents"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # FR-20-06 (f20606a1b2c3): UNIQUE — one consent record per student (ticket §Data model).
     student_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("students.id"), nullable=False, index=True
+        ForeignKey("students.id"), nullable=False, index=True, unique=True
     )
     status: Mapped[ParentalConsentStatus] = mapped_column(
         Enum(ParentalConsentStatus, name="parental_consent_status"),
