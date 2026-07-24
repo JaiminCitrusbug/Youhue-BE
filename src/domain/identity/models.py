@@ -100,6 +100,22 @@ class StaffAccount(Base):
 
 class Student(Base):
     __tablename__ = "students"
+    __table_args__ = (
+        # FR-03-01 roster import: the DB backstop `get_student_by_external_ref`'s select-then-write
+        # cannot be — two concurrent imports (a genuine retry race, not the common sequential retry)
+        # carrying the same school's own student id must not both insert, or the endpoint's
+        # idempotency-on-retry guarantee [BR-05] would silently break under a race, exactly the
+        # class of bug `uq_schools_name_live` (FR-02-01) and `ix_subscriptions_school_id`
+        # (FR-19-02 review fix) already closed elsewhere in this codebase. Rows with NO
+        # external_ref (no natural key) are excluded — those are documented as always-CREATE.
+        Index(
+            "uq_students_school_external_ref",
+            "school_id",
+            "external_ref",
+            unique=True,
+            postgresql_where=text("external_ref IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     school_id: Mapped[uuid.UUID] = mapped_column(

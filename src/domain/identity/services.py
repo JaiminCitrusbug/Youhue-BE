@@ -4,7 +4,7 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from src.constants.enums import SchoolStatus, StaffRole, StaffStatus, StudentStatus
+from src.constants.enums import SchoolStatus, StaffRole, StaffStatus, StudentAgeBand, StudentStatus
 from src.domain.identity.models import InternalAdmin, School, StaffAccount, Student
 
 
@@ -239,6 +239,43 @@ def get_active_student_in_school(
 
 def get_student(db: Session, student_id: uuid.UUID) -> Student | None:
     return db.get(Student, student_id)
+
+
+def get_student_by_external_ref(
+    db: Session, school_id: uuid.UUID, external_ref: str
+) -> Student | None:
+    """FR-03-01 roster import: the upsert/idempotency key for a re-uploaded row that carries the
+    school's own student identifier. Backed by the ``uq_students_school_external_ref`` partial
+    unique index (migration a1b2c3d4e5f6) — this select is the fast path, the index is the race
+    backstop for a genuinely concurrent retry (mirrors ``uq_schools_name_live``, FR-02-01)."""
+    return db.scalar(
+        select(Student).where(
+            Student.school_id == school_id, Student.external_ref == external_ref
+        )
+    )
+
+
+def create_student(
+    db: Session,
+    *,
+    school_id: uuid.UUID,
+    display_name: str,
+    age_band: StudentAgeBand,
+    status: StudentStatus = StudentStatus.active,
+    external_ref: str | None = None,
+) -> Student:
+    """FR-03-01 roster import: create one student, already age-banded (GATE G-2 is satisfied by
+    construction — ``age_band`` is NOT NULL on the model, so no student can exist unbanded)."""
+    student = Student(
+        school_id=school_id,
+        display_name=display_name,
+        age_band=age_band,
+        status=status,
+        external_ref=external_ref,
+    )
+    db.add(student)
+    db.flush()
+    return student
 
 
 def link_sso_subject(db: Session, staff: StaffAccount, subject: str) -> None:

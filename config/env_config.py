@@ -94,6 +94,10 @@ class Settings(BaseSettings):
     # caller can forge it and mint a fresh rate-limit bucket per request.
     trust_proxy_headers: bool = False
 
+    # ---- roster CSV import (FR-03-01) ----
+    roster_import_max_bytes: int = 2_000_000       # ~2MB — generous for a text CSV, still bounded
+    roster_import_max_rows: int = 500              # mirrors the approved screen's stated cap
+
     @property
     def mfa_roles(self) -> list[str]:
         return [r.strip() for r in self.mfa_required_roles.split(",") if r.strip()]

@@ -34,6 +34,12 @@ select = ["E", "F", "I", "B", "UP", "S"]
 [tool.ruff.lint.isort]
 known-first-party = ["src", "config", "main"]
 
+# fastapi.Depends/Query/Path/Body are already bugbear's default immutable-call allowlist;
+# fastapi.File (FR-03-01 roster upload) is the same dependency-injection pattern, just missing
+# from that default list — not a mutable-default bug.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.File"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
