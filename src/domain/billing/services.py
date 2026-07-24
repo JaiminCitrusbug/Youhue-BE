@@ -10,8 +10,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.constants.enums import AlertChannel, DeliveryStatus
-from src.domain.billing.models import Notification
+from src.constants.enums import AlertChannel, DeliveryStatus, SubscriptionState, SubscriptionTier
+from src.domain.billing.models import Notification, Subscription
 from src.domain.risk.models import AlertDelivery
 
 
@@ -112,3 +112,23 @@ def deliveries_for_recipient(db: Session, recipient_id: uuid.UUID) -> list[Alert
 
 def persist(db: Session) -> None:
     db.flush()
+
+
+def arm_trial_subscription(db: Session, school_id: uuid.UUID) -> Subscription:
+    """FR-02-02: on District/Trust approval, ARM the whole-school Premium trial — create the
+    ``Subscription`` row with ``tier=premium``, ``state=trial``, but ``trial_start_at`` left NULL.
+    The clock does NOT start here: FR-17-03 sets ``trial_start_at``/``trial_end_at`` from the
+    school's first student check-in, never from approval. Called once per school, from the same
+    ACID transaction that flips ``School.status`` to ``active`` — the 409 "not pending" guard in
+    ``application/schools/services.py`` is what keeps this a create-once operation (a school can
+    only be approved while pending, and approval flips it out of pending immediately)."""
+    sub = Subscription(
+        school_id=school_id, tier=SubscriptionTier.premium, state=SubscriptionState.trial
+    )
+    db.add(sub)
+    db.flush()
+    return sub
+
+
+def get_subscription_by_school(db: Session, school_id: uuid.UUID) -> Subscription | None:
+    return db.scalar(select(Subscription).where(Subscription.school_id == school_id))

@@ -41,21 +41,45 @@ postcode) captured at registration and reviewed at approval — that is a schema
 and belongs with FR-02-02, where a human already inspects the queue.
 
 Structured logs: ``fr_02_01_success`` / ``_rejected`` / ``_forbidden`` / ``_error``.
+
+--------------------------------------------------------------------------------------------------
+FR-02-02 (District/Trust approval) lives in this module too — same tenant, same router file. See
+the functions below (``list_pending_schools`` / ``get_school_detail`` / ``decide_school``) and their
+own docstrings. Structured logs: ``fr_02_02_success`` / ``_rejected`` / ``_forbidden`` / ``_error``.
 """
 import logging
 import re
+import uuid
+from typing import Literal
 
 from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.constants.enums import SchoolStatus, StaffStatus
+from src.application.authz import services as authz
+from src.application.isolation import services as isolation
+from src.constants.enums import SchoolStatus, StaffRole, StaffStatus
+from src.domain.billing import services as billing_db
 from src.domain.identity import services as identity_db
-from src.domain.identity.models import School
-from src.schemas.schools import RegisterSchoolResponse
+from src.domain.identity.models import School, StaffAccount
+from src.schemas.schools import (
+    PendingSchoolOut,
+    PendingSchoolsResponse,
+    RegisterSchoolResponse,
+    SchoolDecisionResponse,
+    SchoolDetailResponse,
+)
 from src.utils import security
 
 logger = logging.getLogger("youhue.schools")
+
+_NOT_PENDING = HTTPException(
+    status.HTTP_409_CONFLICT,
+    detail={
+        "code": "not_pending",
+        "message": "This school is not awaiting approval (already decided).",
+    },
+)
 
 _MAX_CODE_ATTEMPTS = 10
 _WHITESPACE = re.compile(r"\s+")
@@ -156,3 +180,153 @@ def _allocate_sign_in_code(db: Session) -> str:
     raise HTTPException(
         status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not allocate a school sign-in code"
     )
+
+
+# ================================================================================================
+# FR-02-02 — District/Trust leadership reviews + approves/rejects a pending school
+# ================================================================================================
+#
+# RBAC: reuses the INFRA-03 role gate as-is (``authz.require_roles``), the same primitive every
+# other role-scoped feature calls — no parallel policy layer invented (ticket instruction: follow
+# the ``AdminDep``/staff-role-guard shape already in the codebase). The actor is a ``StaffAccount``
+# with ``StaffRole.district`` — reached via the ordinary ``StaffDep`` (so the actor's OWN school
+# must be active and their own account active), NOT ``require_same_school`` — a District/Trust
+# reviewer acts on OTHER schools' pending registrations by design, so the cross-tenant guard does
+# not apply here.
+#
+# KNOWN GAP (logged, not silently reconciled): the data model has no Trust/District-to-school
+# mapping (no "which trust owns which pending school" table exists anywhere in INFRA-01/02). Any
+# staff account with ``role=district`` can therefore decide on ANY pending school platform-wide,
+# not only "schools requesting to join this trust" as SC-069's copy implies. Introducing real
+# trust-scoping is a schema + product decision outside this ticket's stated scope (it only asks
+# for the district/leadership role check) and is left for a follow-up ticket.
+#
+# READ ENDPOINTS (list + detail) are NOT in the ticket's "What to build" (only the decision POST is
+# named), but the FE DoD requires SC-069/SC-070 wired to real data with "no dead controls" — a list
+# screen and a review screen cannot do that against zero read endpoints. Logged, not silently
+# reconciled: two minimal, district-gated GET endpoints are added so the FE has something real to
+# call, symmetrical with the decision endpoint's own RBAC gate.
+
+
+def list_pending_schools(db: Session, actor: StaffAccount) -> PendingSchoolsResponse:
+    """GET /schools/pending — the District approval queue (SC-069), oldest first."""
+    try:
+        authz.require_roles(actor, StaffRole.district)
+    except HTTPException:
+        logger.warning(
+            "fr_02_02_forbidden action=list actor_id=%s role=%s", actor.id, actor.role.value
+        )
+        raise
+    rows = []
+    for school in identity_db.list_pending_schools(db):
+        registrant = identity_db.get_registrant_of_school(db, school.id)
+        rows.append(
+            PendingSchoolOut(
+                school_id=school.id,
+                name=school.name,
+                registrant_email=registrant.email if registrant else None,
+                created_at=school.created_at,
+            )
+        )
+    return PendingSchoolsResponse(schools=rows)
+
+
+def get_school_detail(
+    db: Session, actor: StaffAccount, school_id: uuid.UUID
+) -> SchoolDetailResponse:
+    """GET /schools/{id} — the single-school review view (SC-070)."""
+    try:
+        authz.require_roles(actor, StaffRole.district)
+    except HTTPException:
+        logger.warning(
+            "fr_02_02_forbidden action=read actor_id=%s role=%s school_id=%s",
+            actor.id, actor.role.value, school_id,
+        )
+        raise
+    school = identity_db.get_school(db, school_id)
+    if school is None:
+        logger.info("fr_02_02_rejected action=read reason=not_found school_id=%s", school_id)
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "School not found")
+    registrant = identity_db.get_registrant_of_school(db, school.id)
+    return SchoolDetailResponse(
+        school_id=school.id,
+        name=school.name,
+        status=school.status.value,
+        registrant_email=registrant.email if registrant else None,
+        student_count=identity_db.count_students_in_school(db, school.id),
+        created_at=school.created_at,
+    )
+
+
+def decide_school(
+    db: Session, actor: StaffAccount, school_id: uuid.UUID, decision: str
+) -> SchoolDecisionResponse:
+    """POST /schools/{id}/decision — approve or reject a pending school. One ACID transaction
+    (the router commits once, on success); every branch that raises leaves nothing written the
+    router has not already been told to roll back.
+
+    Approve:
+      * ``School.status`` -> ``active`` (the school goes live — GATE G-1 stops blocking check-ins);
+      * the registrant (and any other still-``invited`` staff at the school) -> ``active``
+        (FR-02-01's documented follow-on: "FR-02-02 activates the school and its registrant
+        together");
+      * a ``Subscription`` row is armed: ``tier=premium``, ``state=trial``, ``trial_start_at=None``
+        — the 6-week whole-school Premium trial clock does NOT start here (FR-17-03, first
+        check-in).
+
+    Reject:
+      * ``School.status`` -> ``rejected`` — recorded, terminal; the school stays not-live. No
+        ``Subscription`` row is created (nothing to arm for a school that will never go live from
+        this registration; ``uq_schools_name_live`` also releases the name for a fresh attempt).
+
+    409 (idempotency/re-decision guard [BR-05]): the school is locked ``FOR UPDATE`` and re-checked
+    for ``pending`` inside the transaction, so two concurrent decisions on the same school cannot
+    both succeed — the loser sees the already-decided status, never re-arms a trial or re-flips a
+    rejection.
+    """
+    try:
+        authz.require_roles(actor, StaffRole.district)
+    except HTTPException:
+        logger.warning(
+            "fr_02_02_forbidden action=decide actor_id=%s role=%s school_id=%s",
+            actor.id, actor.role.value, school_id,
+        )
+        raise
+
+    school = identity_db.get_school_for_decision(db, school_id)
+    if school is None:
+        logger.info("fr_02_02_rejected action=decide reason=not_found school_id=%s", school_id)
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "School not found")
+    if school.status != SchoolStatus.pending:
+        logger.info(
+            "fr_02_02_rejected action=decide reason=not_pending school_id=%s status=%s",
+            school_id, school.status.value,
+        )
+        raise _NOT_PENDING
+
+    result_status: Literal["active", "rejected"]
+    if decision == "approve":
+        school.status = SchoolStatus.active
+        result_status = "active"
+        identity_db.activate_invited_staff_in_school(db, school.id)
+        billing_db.arm_trial_subscription(db, school.id)
+        isolation.audit(
+            db, actor_id=actor.id, action="school.approved", target=str(school.id),
+            school_id=school.id,
+        )
+        logger.info(
+            "fr_02_02_success event=approved school_id=%s actor_id=%s", school.id, actor.id
+        )
+    else:
+        school.status = SchoolStatus.rejected
+        result_status = "rejected"
+        isolation.audit(
+            db, actor_id=actor.id, action="school.rejected", target=str(school.id),
+            school_id=school.id,
+        )
+        logger.info(
+            "fr_02_02_success event=rejected school_id=%s actor_id=%s", school.id, actor.id
+        )
+
+    db.flush()
+    return SchoolDecisionResponse(school_id=school.id, status=result_status)

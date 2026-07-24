@@ -1,4 +1,4 @@
-"""School self-registration schemas (FR-02-01).
+"""School self-registration (FR-02-01) + District/Trust approval (FR-02-02) schemas.
 
 A teacher submits the new school's details plus their own account. Validation is server-side and
 authoritative (client validation is convenience only, ticket §Interaction contract): ``school_name``
@@ -8,6 +8,7 @@ The error models below exist so the endpoint's real status codes appear in ``/op
 generated client that only knows 201/422 treats 409/429 as unexpected transport errors.
 """
 import uuid
+from datetime import datetime
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints
@@ -61,3 +62,64 @@ class ErrorResponse(BaseModel):
     """429 / 500 body — FastAPI's plain-string ``detail``."""
 
     detail: str
+
+
+# --- FR-02-02: District/Trust leadership reviews + decides a pending school -----------------------
+
+
+class PendingSchoolOut(BaseModel):
+    """One row of the District approval queue (SC-069)."""
+
+    school_id: uuid.UUID
+    name: str
+    registrant_email: str | None
+    created_at: datetime
+
+
+class PendingSchoolsResponse(BaseModel):
+    """GET /schools/pending — oldest-first (SC-069 hint 'oldest first')."""
+
+    schools: list[PendingSchoolOut]
+
+
+class SchoolDetailResponse(BaseModel):
+    """GET /schools/{id} — the single-school review view (SC-070). ``student_count`` is a genuine
+    count of existing ``Student`` rows for the school — expected 0 while a school is pending, since
+    no student can exist there until roster import (FR-03-01, not built here)."""
+
+    school_id: uuid.UUID
+    name: str
+    status: Literal["pending", "active", "rejected"]
+    registrant_email: str | None
+    student_count: int
+    created_at: datetime
+
+
+class SchoolDecisionRequest(BaseModel):
+    """POST /schools/{id}/decision body. ``extra="forbid"`` for the same reason as
+    ``RegisterSchool``: no field beyond the one decision can ever escalate the write."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approve", "reject"]
+
+
+class SchoolDecisionResponse(BaseModel):
+    """200 body. ``status`` mirrors the ``SchoolStatus`` the decision produced — never ``pending``,
+    since a decision always resolves the school one way or the other."""
+
+    school_id: uuid.UUID
+    status: Literal["active", "rejected"]
+
+
+class DecisionConflictDetail(BaseModel):
+    code: Literal["not_pending"]
+    message: str
+
+
+class DecisionConflictResponse(BaseModel):
+    """409 body — the school exists but is no longer pending (already decided, or a retry after a
+    first decision already committed). Idempotency-on-retry [BR-05]: a second decision call never
+    re-arms a trial or re-flips a rejection; it is a terminal conflict."""
+
+    detail: DecisionConflictDetail
