@@ -137,8 +137,10 @@ def make_admin(db: Session) -> Callable[..., InternalAdmin]:
 
 @pytest.fixture()
 def make_student(db: Session) -> Callable[..., Student]:
-    def _make(school: School, name: str = "Amy") -> Student:
-        student = Student(school_id=school.id, display_name=name, age_band=StudentAgeBand.b8_11)
+    def _make(
+        school: School, name: str = "Amy", age_band: StudentAgeBand = StudentAgeBand.b8_11
+    ) -> Student:
+        student = Student(school_id=school.id, display_name=name, age_band=age_band)
         db.add(student)
         db.commit()
         db.refresh(student)

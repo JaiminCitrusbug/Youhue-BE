@@ -98,6 +98,18 @@ class Settings(BaseSettings):
     roster_import_max_bytes: int = 2_000_000       # ~2MB — generous for a text CSV, still bounded
     roster_import_max_rows: int = 500              # mirrors the approved screen's stated cap
 
+    # ---- daily check-in mood set (FR-04-01) — PLACEHOLDER pending client confirmation (ticket
+    # Q-3: "the exact per-band mood set is an assumption pending client confirmation... carry the
+    # set as configuration, do not hard-code contents as a product decision"). Same env-driven
+    # placeholder posture as `default_concern_words` above. Values are indices into the fixed
+    # 0..5 mood ladder `CheckIn.mood_value` already documents (0=most negative..5=most positive;
+    # angry=0, sad=1, worried=2, ok=3, good=4, great=5 — matches the approved StudentCheckIn.tsx
+    # MOODS array order). Each env var lists which of the six the age band sees, comma-separated;
+    # the default reflects the approved screen's own copy ("younger pupils see fewer faces").
+    mood_set_b5_7: str = "1,3,5"          # sad / ok / great — fewer faces for the youngest band
+    mood_set_b8_11: str = "0,1,2,3,4,5"
+    mood_set_b12_18: str = "0,1,2,3,4,5"
+
     @property
     def mfa_roles(self) -> list[str]:
         return [r.strip() for r in self.mfa_required_roles.split(",") if r.strip()]

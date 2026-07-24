@@ -10,6 +10,7 @@ from src.routers.admin import router as admin_router
 from src.routers.auth import me_router
 from src.routers.auth import router as auth_router
 from src.routers.calendar import router as calendar_router
+from src.routers.checkins import router as checkins_router
 from src.routers.health import router as health_router
 from src.routers.leadership import router as leadership_router
 from src.routers.notifications import router as notifications_router
@@ -32,3 +33,4 @@ app.include_router(students_router, prefix=settings.api_prefix)
 app.include_router(notifications_router, prefix=settings.api_prefix)
 app.include_router(risk_router, prefix=settings.api_prefix)
 app.include_router(calendar_router, prefix=settings.api_prefix)
+app.include_router(checkins_router, prefix=settings.api_prefix)

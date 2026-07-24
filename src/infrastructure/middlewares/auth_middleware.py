@@ -14,10 +14,10 @@ from sqlalchemy.orm import Session
 
 from config.db_connection import get_db
 from src.application.auth import sessions
-from src.constants.enums import SessionKind, StaffStatus
+from src.constants.enums import SessionKind, StaffStatus, StudentStatus
 from src.domain.auth.models import AuthSession
 from src.domain.identity import services as identity_db
-from src.domain.identity.models import StaffAccount
+from src.domain.identity.models import StaffAccount, Student
 from src.utils.security import decode_jwt
 
 _bearer = HTTPBearer(auto_error=True)
@@ -74,6 +74,27 @@ def get_current_staff(sess: SessionDep, db: DbDep) -> StaffAccount:
 
 
 StaffDep = Annotated[StaffAccount, Depends(get_current_staff)]
+
+
+def get_current_student(sess: SessionDep, db: DbDep) -> Student:
+    """FR-04-01: resolves the CALLER's own student account off the session's `subject_id` —
+    never a request param, so a student route can never act on behalf of anyone else (mirrors
+    `get_current_staff` above, applied to the student surface)."""
+    if sess.kind != SessionKind.student:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")
+    student = db.get(Student, sess.subject_id)
+    if student is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "No account")
+    # Same "checked per request, not just at token mint" posture as `get_current_staff`: a
+    # deactivated student or a school that stops being live takes effect immediately.
+    if student.status != StudentStatus.active or not identity_db.school_is_active(
+        db, student.school_id
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")
+    return student
+
+
+StudentDep = Annotated[Student, Depends(get_current_student)]
 
 
 def require_same_school(sess: AuthSession, resource_school_id: uuid.UUID) -> None:

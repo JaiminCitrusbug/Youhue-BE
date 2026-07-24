@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -84,4 +85,28 @@ class ActivityEngagement(Base):
     )
     at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class CheckInSettings(Base):
+    """FR-04-01 (ticket Scenario 3): the school-level "require a reflection" toggle. NOT part of the
+    FR-16-02 settings hub — that hub's three surfaces (concern words / alert routing / access
+    window) never covered this, and FR-16-02's own ticket text does not mention it; this ticket adds
+    the minimal row itself rather than reusing an unrelated table. Default `False` (reflection
+    optional) so a school with no row yet behaves exactly like "optional" — never accidentally
+    blocking every check-in the moment this ships.
+
+    No leadership-facing write surface is built by this ticket (out of scope here) — see
+    ``docs/DEFERRALS.md``. Tests and any future caller write it directly via
+    ``src.domain.checkin.services.set_checkin_settings``.
+    """
+
+    __tablename__ = "checkin_settings"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    school_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("schools.id"), nullable=False, unique=True, index=True
+    )
+    require_reflection: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
     )
