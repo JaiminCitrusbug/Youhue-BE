@@ -9,17 +9,39 @@ from fastapi import APIRouter, HTTPException, status
 from src.application.checkin import services as checkin_svc
 from src.application.risk import services as risk_svc
 from src.infrastructure.middlewares.auth_middleware import DbDep, StudentDep
-from src.schemas.checkin import CheckInCreate, CheckInOut, ErrorResponse, MoodSetOut
+from src.schemas.checkin import CheckInConfigOut, CheckInCreate, CheckInOut, ErrorResponse
 
 logger = logging.getLogger("youhue.checkin")
 router = APIRouter(prefix="/check-ins", tags=["check-ins"])
 
 
-@router.get("/mood-set", response_model=MoodSetOut)
-def get_mood_set(student: StudentDep) -> MoodSetOut:
-    """The age-appropriate mood set (config-driven, ticket Q-3) for the CALLER's own age band —
-    the mood-selection screen reads this before rendering its faces."""
-    return MoodSetOut(values=checkin_svc.get_mood_set(student))
+@router.get(
+    "/config",
+    response_model=CheckInConfigOut,
+    responses={
+        status.HTTP_500_INTERNAL_SERVER_ERROR: {
+            "model": ErrorResponse,
+            "description": "Could not resolve the caller's check-in config.",
+        },
+    },
+)
+def get_checkin_config(student: StudentDep) -> CheckInConfigOut:
+    """FR-04-03 — the CALLER's own age-matched check-in config (mode/mood_set/read_aloud);
+    supersedes FR-04-01's `GET /mood-set`. The mood-selection screen reads this before rendering
+    its faces."""
+    try:
+        mode, mood_set, read_aloud = checkin_svc.get_checkin_config(student)
+    except Exception as exc:  # noqa: BLE001 — last-resort guard, never leak an unhandled 500
+        logger.exception(
+            "fr_04_03_error action=get_checkin_config student_id=%s", student.id
+        )
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not resolve check-in config"
+        ) from exc
+    logger.info(
+        "fr_04_03_success action=get_checkin_config student_id=%s mode=%s", student.id, mode
+    )
+    return CheckInConfigOut(mode=mode, mood_set=mood_set, read_aloud=read_aloud)
 
 
 @router.post(

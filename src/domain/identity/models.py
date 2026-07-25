@@ -124,7 +124,7 @@ class Student(Base):
     external_ref: Mapped[str | None] = mapped_column(String, nullable=True)
     display_name: Mapped[str] = mapped_column(String, nullable=False)
     age_band: Mapped[StudentAgeBand] = mapped_column(
-        Enum(StudentAgeBand, name="student_age_band"), nullable=False
+        Enum(StudentAgeBand, name="student_age_band"), nullable=False, index=True
     )
     status: Mapped[StudentStatus] = mapped_column(
         Enum(StudentStatus, name="student_status"), nullable=False, default=StudentStatus.active

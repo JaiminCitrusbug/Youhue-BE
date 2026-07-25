@@ -26,6 +26,7 @@ Structured logs: `fr_07_03_success` / `_rejected` / `_forbidden` / `_error` (tic
 import logging
 import uuid
 from datetime import UTC, datetime, time, timedelta
+from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException, status
@@ -160,9 +161,34 @@ def mood_set_for_band(age_band: StudentAgeBand) -> list[int]:
     return _parse_mood_set(raw)
 
 
-def get_mood_set(student: Student) -> list[int]:
-    """The CALLER's own age-appropriate mood set — GET /api/v1/check-ins/mood-set reads this."""
-    return mood_set_for_band(student.age_band)
+# =================================================================================================
+# FR-04-03 — GET /api/v1/check-ins/config: the caller's own age-matched check-in config
+# (mode/mood_set/read_aloud). Supersedes FR-04-01's narrower `get_mood_set` (removed) — one config
+# read replaces the mood-set-only read, per the FR-04-03 batch clarification-gate decision to
+# consolidate rather than ship two overlapping endpoints.
+# =================================================================================================
+
+_SIMPLE_MODE_BANDS = (StudentAgeBand.b5_7, StudentAgeBand.b8_11)
+
+
+def get_checkin_config(student: Student) -> tuple[Literal["simple", "rich"], list[int], bool]:
+    """Returns `(mode, mood_set, read_aloud)` for the CALLER's own age band.
+
+    `mode`/`read_aloud` follow the approved `StudentCheckIn.tsx` design comment verbatim ("5–7 /
+    8–11 see a simpler set + read-aloud; 12–18 see richer wording") — b5_7 AND b8_11 both render
+    the simplified/read-aloud mode; only b12_18 is "rich". `mood_set` CONTENTS stay config-driven
+    per age band (ticket Q-3, unchanged from FR-04-01's `mood_set_for_band`) — this ticket does
+    not ratify or alter those values, only adds the mode/read_aloud classification around them.
+
+    No rejected/forbidden branch: `Student.age_band` is a NOT NULL column set at roster import
+    (FR-03-01) — GATE G-2 ("cannot age-band until a roster carrying age/grade is imported") is
+    enforced there, not here. An authenticated student's own config resolution cannot fail on
+    business grounds, so `fr_04_03_rejected`/`fr_04_03_forbidden` have no reachable call site;
+    only `fr_04_03_success`/`fr_04_03_error` are emitted (see the router).
+    """
+    simple = student.age_band in _SIMPLE_MODE_BANDS
+    mode: Literal["simple", "rich"] = "simple" if simple else "rich"
+    return mode, mood_set_for_band(student.age_band), simple
 
 
 def submit_checkin(

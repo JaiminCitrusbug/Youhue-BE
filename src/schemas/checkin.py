@@ -1,5 +1,6 @@
-"""FR-04-01 — daily check-in submit + mood-set read shapes."""
+"""FR-04-01 — daily check-in submit shapes. FR-04-03 — age-banded check-in config shape."""
 import uuid
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -37,8 +38,12 @@ class CheckInOut(BaseModel):
     activity_offer: ActivityOfferOut | None = None
 
 
-class MoodSetOut(BaseModel):
-    """The CALLER's own age-appropriate mood set (config-driven, ticket Q-3) — a list of the
-    `CheckIn.mood_value` ints the caller's age band may submit."""
+class CheckInConfigOut(BaseModel):
+    """FR-04-03 — `GET /api/v1/check-ins/config`: the CALLER's own age-matched check-in config.
+    Supersedes FR-04-01's narrower `GET /check-ins/mood-set` (same `mood_set` data, now carried
+    alongside `mode`/`read_aloud` so the mood-select screen has one contract to read instead of
+    two) — resolved user decision on the FR-04-03 batch clarification gate."""
 
-    values: list[int]
+    mode: Literal["simple", "rich"]
+    mood_set: list[int]
+    read_aloud: bool

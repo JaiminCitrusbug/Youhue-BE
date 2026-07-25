@@ -1,4 +1,5 @@
-"""FR-04-01 — POST /api/v1/check-ins (mood + optional/required reflection) + GET /mood-set.
+"""FR-04-01 — POST /api/v1/check-ins (mood + optional/required reflection).
+FR-04-03 — GET /check-ins/config (supersedes FR-04-01's original GET /mood-set).
 
 Every ticket Must-not / Scenario has a test that fails if the guarantee is removed:
 
@@ -47,7 +48,7 @@ from src.domain.compliance import services as compliance_db
 from src.domain.org.models import CalendarConfig
 
 CHECKINS = "/api/v1/check-ins"
-MOOD_SET = "/api/v1/check-ins/mood-set"
+CHECKIN_CONFIG = "/api/v1/check-ins/config"
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -320,7 +321,7 @@ def test_activity_offer_is_always_null(client, db, make_school, make_student):
 # ---- MN-7 — config-driven mood set ------------------------------------------------------------------
 
 
-def test_mood_set_endpoint_reflects_age_band_config(client, db, make_school, make_student):
+def test_checkin_config_endpoint_reflects_age_band_config(client, db, make_school, make_student):
     school = make_school(code="CKS-17")
     young = make_student(school, name="Young", age_band=StudentAgeBand.b5_7)
     older = make_student(school, name="Older", age_band=StudentAgeBand.b12_18)
@@ -329,8 +330,43 @@ def test_mood_set_endpoint_reflects_age_band_config(client, db, make_school, mak
     _verify_consent(db, older)
     young_token = _student_token(client, school, young)
     older_token = _student_token(client, school, older)
-    assert client.get(MOOD_SET, headers=_auth(young_token)).json()["values"] == [1, 3, 5]
-    assert client.get(MOOD_SET, headers=_auth(older_token)).json()["values"] == [0, 1, 2, 3, 4, 5]
+    assert client.get(CHECKIN_CONFIG, headers=_auth(young_token)).json()["mood_set"] == [1, 3, 5]
+    assert client.get(CHECKIN_CONFIG, headers=_auth(older_token)).json()["mood_set"] == [
+        0, 1, 2, 3, 4, 5,
+    ]
+
+
+# ---- FR-04-03 — GET /check-ins/config: age-band -> mode/read_aloud -------------------------------
+
+
+@pytest.mark.parametrize(
+    "age_band,expected_mode,expected_read_aloud",
+    [
+        (StudentAgeBand.b5_7, "simple", True),
+        (StudentAgeBand.b8_11, "simple", True),
+        (StudentAgeBand.b12_18, "rich", False),
+    ],
+)
+def test_checkin_config_mode_and_read_aloud_by_age_band(
+    client, db, make_school, make_student, age_band, expected_mode, expected_read_aloud
+):
+    school = make_school(code=f"CKS-{age_band.value}")
+    student = make_student(school, age_band=age_band)
+    _open_all_day_window(db, school)
+    _verify_consent(db, student)
+    token = _student_token(client, school, student)
+    r = client.get(CHECKIN_CONFIG, headers=_auth(token))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == expected_mode
+    assert body["read_aloud"] is expected_read_aloud
+
+
+def test_checkin_config_requires_auth(client):
+    # No Authorization header at all -> the security dependency itself rejects (403 "Not
+    # authenticated"), the same convention every other protected endpoint in this codebase uses;
+    # a present-but-invalid token is what yields the middleware's own 401 "Invalid token".
+    assert client.get(CHECKIN_CONFIG).status_code == 403
 
 
 def test_mood_set_for_band_is_config_driven_not_hardcoded(monkeypatch):
