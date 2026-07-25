@@ -26,6 +26,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from config.env_config import settings
+from src.application.isolation import services as isolation_svc
 from src.constants.enums import InvitationStatus, StaffClassScope, StaffRole, StaffStatus
 from src.domain.identity import services as identity_db
 from src.domain.identity.models import StaffAccount
@@ -66,6 +67,17 @@ def _require_class_owner(db: Session, staff: StaffAccount, class_id: uuid.UUID) 
         raise _NOT_CLASS_OWNER
 
 
+def _audit_cross_tenant(db: Session, staff: StaffAccount, action: str, target: str) -> None:
+    """FR-20-07: immutable audit for a REAL cross-tenant reach attempt (the resource exists, just
+    not at the caller's school) — committed immediately, same as `students/services.py::_audit`,
+    since the router rolls back the session when it catches the HTTPException raised right after
+    this call; an audit row that only lived in the same doomed transaction would vanish with it."""
+    isolation_svc.audit(
+        db, actor_id=staff.id, action=action, target=target, school_id=staff.school_id
+    )
+    db.commit()
+
+
 def _dispatch(invitation: Invitation, class_name: str) -> None:
     """Send the invitation email. A send failure propagates (never caught here) so the invitation
     row it belongs to is rolled back by the router — 'sent' is never claimed unless dispatch
@@ -85,6 +97,8 @@ def list_class_invitations(
     """GET-side, read-only: the 'Pending invitations' table (SC-059). Class-owner-only, same
     school — no side effect, no transaction to commit/roll back."""
     klass = org_db.get_class(db, class_id)
+    if klass is not None and klass.school_id != staff.school_id:
+        _audit_cross_tenant(db, staff, "invitation.list.cross_tenant_denied", str(class_id))
     if klass is None or klass.school_id != staff.school_id:
         logger.info("fr_02_03_rejected reason=class_not_found class_id=%s", class_id)
         raise _CLASS_NOT_FOUND
@@ -107,6 +121,8 @@ def invite_colleague(
     db: Session, staff: StaffAccount, class_id: uuid.UUID, email: str
 ) -> SendInvitationResponse:
     klass = org_db.get_class(db, class_id)
+    if klass is not None and klass.school_id != staff.school_id:
+        _audit_cross_tenant(db, staff, "invitation.invite.cross_tenant_denied", str(class_id))
     if klass is None or klass.school_id != staff.school_id:
         logger.info("fr_02_03_rejected reason=class_not_found class_id=%s", class_id)
         raise _CLASS_NOT_FOUND
@@ -151,6 +167,10 @@ def action_on_invitation(
     token outright). Class-owner-only, same-school-only; 409 if the invitation is not currently
     pending (already accepted/revoked/expired — no re-actioning a resolved invitation)."""
     invitation = org_db.get_invitation(db, invitation_id)
+    if invitation is not None and invitation.school_id != staff.school_id:
+        _audit_cross_tenant(
+            db, staff, f"invitation.{action}.cross_tenant_denied", str(invitation_id)
+        )
     if invitation is None or invitation.school_id != staff.school_id or invitation.class_id is None:
         logger.info("fr_02_03_rejected reason=not_found invitation_id=%s", invitation_id)
         raise _INVITATION_NOT_FOUND

@@ -13,10 +13,15 @@ zero cross-school coverage — a repo-wide grep for `school_b`/`cross.school`/`o
 structurally self-scoped (the caller's own `StudentDep`, no ID parameter reaching another
 student's or school's data), so there is no cross-tenant vector to exercise — confirmed by reading
 `src/routers/checkins.py` (neither endpoint accepts a student/school identifier from the caller).
+
+Every real cross-tenant denial below also writes an immutable `AuditLog` row (BR-12) via the
+shared `isolation.audit()` choke point — previously invitations' cross-tenant rejections were only
+structured-logged, never audited; this closes that gap too, not just the missing log line.
 """
 import pytest
 
 from src.constants.enums import StaffClassScope
+from src.domain.compliance.models import AuditLog
 
 SIGNIN = "/api/v1/auth/staff/sign-in"
 
@@ -40,30 +45,38 @@ def _owner_at_school_a(client, make_school, make_staff, make_class, grant_class_
 
 @pytest.mark.authz
 def test_list_invitations_cross_school_denied(
-    client, make_school, make_staff, make_class, grant_class_access
+    client, db, make_school, make_staff, make_class, grant_class_access
 ):
-    """A School-B class-owner must get nothing back for School A's class invitations list."""
+    """A School-B class-owner must get nothing back for School A's class invitations list, and
+    the attempt is written to the immutable audit log (fr_20_07_audit / BR-12)."""
     school_a, klass_a, _ = _owner_at_school_a(client, make_school, make_staff, make_class, grant_class_access)
     make_school(code="XT-B")  # school_b exists in the platform, unrelated to the caller below
     school_b_owner_school = make_school(code="XT-B2")
-    make_staff(school_b_owner_school, email="intruder@oakwood.edu")
+    intruder = make_staff(school_b_owner_school, email="intruder@oakwood.edu")
     intruder_token = _staff_token(client, "intruder@oakwood.edu")
 
     r = client.get(f"/api/v1/classes/{klass_a.id}/invitations", headers=_auth(intruder_token))
     assert r.status_code in (403, 404)  # never 200, never leaks School A's pending invitations
 
+    audited = [row for row in db.query(AuditLog).all() if row.action == "invitation.list.cross_tenant_denied"]
+    assert len(audited) == 1
+    assert audited[0].actor_id == intruder.id
+    assert audited[0].target == str(klass_a.id)
+    assert audited[0].school_id == intruder.school_id  # the ACTOR's school, not the target's
+
 
 @pytest.mark.authz
 def test_invite_colleague_cross_school_denied(
-    client, monkeypatch, make_school, make_staff, make_class, grant_class_access
+    client, db, monkeypatch, make_school, make_staff, make_class, grant_class_access
 ):
-    """A School-B staff member cannot invite anyone into a School-A class."""
+    """A School-B staff member cannot invite anyone into a School-A class, and the attempt is
+    written to the immutable audit log."""
     import src.application.invitations.services as invitations_mod
 
     monkeypatch.setattr(invitations_mod, "send_email", lambda *a, **k: None)
     school_a, klass_a, _ = _owner_at_school_a(client, make_school, make_staff, make_class, grant_class_access)
     school_b = make_school(code="XT-C")
-    make_staff(school_b, email="intruder2@oakwood.edu")
+    intruder = make_staff(school_b, email="intruder2@oakwood.edu")
     intruder_token = _staff_token(client, "intruder2@oakwood.edu")
 
     r = client.post(
@@ -73,15 +86,20 @@ def test_invite_colleague_cross_school_denied(
     )
     assert r.status_code in (403, 404)
 
+    audited = [row for row in db.query(AuditLog).all() if row.action == "invitation.invite.cross_tenant_denied"]
+    assert len(audited) == 1
+    assert audited[0].actor_id == intruder.id
+    assert audited[0].target == str(klass_a.id)
+
 
 @pytest.mark.authz
 def test_action_on_invitation_cross_school_denied(
-    client, monkeypatch, make_school, make_staff, make_class, grant_class_access
+    client, db, monkeypatch, make_school, make_staff, make_class, grant_class_access
 ):
     """A School-B staff member cannot resend or revoke a School-A invitation, even knowing its
     real invitation_id — the mechanism must reject on `invitation.school_id != staff.school_id`,
     not merely on not being the class owner (the same school, wrong owner case is already covered
-    by `test_invitations.py::test_invite_forbidden_not_owner`)."""
+    by `test_invitations.py::test_invite_forbidden_not_owner`). Both attempts are audited."""
     import src.application.invitations.services as invitations_mod
 
     captured: dict[str, str] = {}
@@ -100,7 +118,7 @@ def test_action_on_invitation_cross_school_denied(
     invitation_id = invite_resp.json()["invitation_id"]
 
     school_b = make_school(code="XT-D")
-    make_staff(school_b, email="intruder3@oakwood.edu")
+    intruder = make_staff(school_b, email="intruder3@oakwood.edu")
     intruder_token = _staff_token(client, "intruder3@oakwood.edu")
 
     revoke_r = client.post(
@@ -121,3 +139,16 @@ def test_action_on_invitation_cross_school_denied(
     list_r = client.get(f"/api/v1/classes/{klass_a.id}/invitations", headers=_auth(owner_token))
     assert list_r.status_code == 200
     assert list_r.json()["invitations"][0]["status"] in ("invited", "sent")
+
+    revoke_audit = [
+        row for row in db.query(AuditLog).all()
+        if row.action == "invitation.revoke.cross_tenant_denied"
+    ]
+    resend_audit = [
+        row for row in db.query(AuditLog).all()
+        if row.action == "invitation.resend.cross_tenant_denied"
+    ]
+    assert len(revoke_audit) == 1
+    assert len(resend_audit) == 1
+    assert revoke_audit[0].actor_id == intruder.id == resend_audit[0].actor_id
+    assert revoke_audit[0].target == str(invitation_id) == resend_audit[0].target
