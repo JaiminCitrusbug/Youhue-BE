@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from config.env_config import settings
 from src.routers.admin import router as admin_router
+from src.routers.alert_config import router as alert_config_router
 from src.routers.auth import me_router
 from src.routers.auth import router as auth_router
 from src.routers.calendar import router as calendar_router
@@ -38,3 +39,4 @@ app.include_router(calendar_router, prefix=settings.api_prefix)
 app.include_router(checkins_router, prefix=settings.api_prefix)
 app.include_router(invitations_router, prefix=settings.api_prefix)
 app.include_router(classes_router, prefix=settings.api_prefix)
+app.include_router(alert_config_router, prefix=settings.api_prefix)

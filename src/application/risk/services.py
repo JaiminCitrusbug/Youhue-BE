@@ -9,19 +9,25 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from config.env_config import settings
+from src.application.authz import services as authz
 from src.application.derived import services as derived
-from src.constants.enums import FlagType
+from src.constants.enums import FlagType, StaffRole
 from src.domain.checkin import services as checkin_db
 from src.domain.checkin.models import CheckIn
+from src.domain.identity import services as identity_db
+from src.domain.identity.models import StaffAccount
 from src.domain.risk import services as risk_db
+from src.domain.risk.models import AlertRecipientConfig
 
 logger = logging.getLogger("youhue.risk")
 
 CONCERN_WORD_SCORE = 0.90
 SLOW_BURN_SCORE = 0.70
+_ALLOWED_ALERT_TYPES = ("immediate", "triage")
 
 
 @dataclass
@@ -150,6 +156,54 @@ def evaluate_slow_burn(db: Session, student_id: uuid.UUID, school_id: uuid.UUID)
         risk_score=score,
     )
     return True
+
+
+def set_alert_config(
+    db: Session,
+    actor: StaffAccount,
+    school_id: uuid.UUID,
+    alert_type: str,
+    recipient_staff_ids: list[uuid.UUID],
+) -> AlertRecipientConfig:
+    """FR-12-05: PUT /api/v1/schools/{id}/alert-config — leadership sets the ordered recipient
+    chain for one alert_type; a flag has no route until this exists (GATE G-5). Leadership-only,
+    school-scoped (BR-01); recipients must be staff at the caller's own school. Shares the
+    underlying table/write path with FR-16-02's settings PATCH
+    (`risk_db.set_alert_recipient_config`, now DB-upsert-backed — see its docstring) but owns its
+    OWN dedicated endpoint contract and log namespace, per this ticket's explicit DoD."""
+    try:
+        authz.require_roles(actor, StaffRole.leadership)
+    except HTTPException:
+        logger.warning(
+            "fr_12_05_forbidden action=set_alert_config actor_id=%s reason=role", actor.id
+        )
+        raise
+    if actor.school_id != school_id:
+        logger.warning(
+            "fr_12_05_forbidden action=set_alert_config actor_id=%s reason=cross_tenant "
+            "school_id=%s", actor.id, school_id,
+        )
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")
+    if alert_type not in _ALLOWED_ALERT_TYPES:
+        logger.warning(
+            "fr_12_05_rejected action=set_alert_config actor_id=%s reason=bad_alert_type", actor.id
+        )
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unsupported alert type")
+    school_staff_ids = {s.id for s in identity_db.list_staff_in_school(db, school_id)}
+    if any(rid not in school_staff_ids for rid in recipient_staff_ids):
+        logger.warning(
+            "fr_12_05_rejected action=set_alert_config actor_id=%s "
+            "reason=cross_tenant_recipient", actor.id,
+        )
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "Recipient must be staff at your school"
+        )
+    row = risk_db.set_alert_recipient_config(db, school_id, alert_type, recipient_staff_ids)
+    logger.info(
+        "fr_12_05_success action=set_alert_config actor_id=%s school_id=%s alert_type=%s",
+        actor.id, school_id, alert_type,
+    )
+    return row
 
 
 def process_pending(db: Session) -> int:

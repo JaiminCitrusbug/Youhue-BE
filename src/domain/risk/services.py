@@ -80,27 +80,41 @@ def get_alert_recipient_config(
 def set_alert_recipient_config(
     db: Session, school_id: uuid.UUID, alert_type: str, recipient_staff_ids: list[uuid.UUID]
 ) -> AlertRecipientConfig:
-    """Upsert the ordered recipient chain for one alert_type (FR-16-02 stores ONLY the config; the
-    escalation/order ENGINE that consumes it is FR-12-05 — out of this ticket's scope). Order is
-    carried by array position in ``recipient_staff_ids``, not ``order_index`` (reserved for a future
-    multi-rule-per-alert-type extension FR-12-05 may need; unused here). Caller commits.
+    """Upsert the ordered recipient chain for one alert_type (shared by FR-16-02's settings surface
+    and FR-12-05's dedicated `PUT /alert-config` endpoint; the escalation/order ENGINE that consumes
+    this config is FR-12-08 — out of both tickets' scope). Order is carried by array position in
+    ``recipient_staff_ids``, not ``order_index`` (reserved for a future multi-rule-per-alert-type
+    extension; unused here — a single row's order_index cannot represent a per-recipient order for
+    a list-valued column, only a future per-rule ranking). Caller commits.
 
-    KNOWN GAP (logged, not silently reconciled): there is no DB-level unique constraint on
-    (school_id, alert_type) — this read-then-write is an application-level upsert, not a DB-enforced
-    one. Acceptable for this ticket's low-concurrency leadership-config-edit surface; a real unique
-    index is a schema change left for FR-12-05 if it needs a stronger guarantee."""
-    row = get_alert_recipient_config(db, school_id, alert_type)
-    if row is None:
-        row = AlertRecipientConfig(
+    FR-12-05 closed a KNOWN GAP this function used to have (a plain read-then-write with no DB
+    backstop — see migration f7a3c9e21b04): now a real `INSERT ... ON CONFLICT (school_id,
+    alert_type) DO UPDATE`, backed by `uq_alert_recipient_configs_school_type`. Two concurrent
+    writers for the same (school_id, alert_type) converge on whichever commits last — a plain "set
+    the config" semantic, not upsert-and-converge-onto-the-first-writer (unlike FR-12-03's
+    open-flag upsert) or reject-the-loser (unlike FR-02-01's checkin upsert): a leadership config
+    write has no "first writer wins" business meaning, the latest save is simply the config."""
+    stmt = (
+        pg_insert(AlertRecipientConfig)
+        .values(
             school_id=school_id,
             alert_type=alert_type,
             recipient_staff_ids=list(recipient_staff_ids),
             order_index=0,
         )
-        db.add(row)
-    else:
-        row.recipient_staff_ids = list(recipient_staff_ids)
+        .on_conflict_do_update(
+            index_elements=["school_id", "alert_type"],
+            set_={"recipient_staff_ids": list(recipient_staff_ids)},
+        )
+    )
+    db.execute(stmt)
     db.flush()
+    row = get_alert_recipient_config(db, school_id, alert_type)
+    if row is None:  # pragma: no cover - the upsert above guarantees a row exists by now
+        raise RuntimeError(
+            f"alert-config upsert invariant violated for school_id={school_id} "
+            f"alert_type={alert_type}"
+        )
     return row
 
 
