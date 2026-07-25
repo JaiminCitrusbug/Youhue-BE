@@ -65,7 +65,7 @@ class ClassInvitationsResponse(BaseModel):
 class InvitationPreviewResponse(BaseModel):
     """GET /invitations/{token} — what AcceptInvite.tsx (SC-019) renders BEFORE the invitee
     commits: the class name + who invited them. Not in the ticket's DoD endpoint list, but the FE
-    screen names real class/inviter data (never fabricated placeholder copy) — same class of
+    screen names real class/inviter data (never invented, stand-in copy) — same class of
     justified, logged addition as FR-02-02's two read endpoints. ``inviter_email`` (not a name):
     ``StaffAccount`` has no display-name field anywhere in the model, the same real gap FR-04-01's
     review already found and resolved by dropping fabricated copy rather than inventing a field."""
