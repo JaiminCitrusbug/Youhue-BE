@@ -132,20 +132,20 @@ def evaluate_slow_burn(db: Session, student_id: uuid.UUID, school_id: uuid.UUID)
     the slow-burn trend inline when a NEW check-in lands). Lets a scheduled system process catch a
     quiet decline even on a day the student doesn't check in at all.
 
-    Idempotent: does not raise a second slow_burn flag while one is already open for the student
-    (a checkin_id-keyed uniqueness constraint doesn't apply here since this call has no checkin to
-    anchor to — checkin_id is left null on the created flag).
+    Idempotent under real concurrency, not just sequential retry: a checkin_id-keyed uniqueness
+    constraint doesn't apply here (this call has no checkin to anchor to — checkin_id is left null
+    on the created flag), so the actual backstop is `upsert_open_flag`'s DB-level partial unique
+    index + ON CONFLICT DO NOTHING + SELECT ... FOR UPDATE convergence — see its docstring.
     """
     if risk_db.get_open_flag(db, student_id, FlagType.slow_burn) is not None:
-        return True
+        return True  # cheap fast path only — the real race-safety is upsert_open_flag below
     score = detect_slow_burn(db, student_id)
     if score < settings.risk_triage_threshold:
         return False
-    risk_db.create_flag(
+    risk_db.upsert_open_flag(
         db,
         student_id=student_id,
         school_id=school_id,
-        checkin_id=None,
         flag_type=FlagType.slow_burn,
         risk_score=score,
     )

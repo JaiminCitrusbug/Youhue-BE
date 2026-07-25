@@ -65,6 +65,16 @@ class Flag(Base):
         Index("ix_flags_school_status", "school_id", "status"),
         # one flag per scored check-in -> scoring is idempotent on retry (INFRA-06 §Must-nots).
         UniqueConstraint("checkin_id", name="uq_flags_checkin_id"),
+        # FR-12-03: at most one OPEN flag per (student_id, type) -> a checkin_id=NULL
+        # background-evaluation flag (slow-burn re-evaluate) still has a DB-level idempotency
+        # backstop, since uq_flags_checkin_id gives none when checkin_id is NULL.
+        Index(
+            "uq_flags_open_student_type",
+            "student_id",
+            "type",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)

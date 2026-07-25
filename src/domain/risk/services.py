@@ -1,7 +1,8 @@
 """Risk domain services — DB access only. M-12 is the sole writer of Flag."""
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from src.constants.enums import FlagBand, FlagStatus, FlagType
@@ -108,8 +109,10 @@ def get_flag_by_checkin(db: Session, checkin_id: uuid.UUID) -> Flag | None:
 
 
 def get_open_flag(db: Session, student_id: uuid.UUID, flag_type: FlagType) -> Flag | None:
-    """The student's own OPEN flag of this type, if any (FR-12-03 idempotency: a background
-    slow-burn evaluation while one is already open must not raise a second one)."""
+    """The student's own OPEN flag of this type, if any — a cheap read-only fast path (skip
+    rescoring when the caller already knows a flag exists). NOT the idempotency mechanism itself
+    (see `upsert_open_flag` for the DB-level backstop; a plain SELECT here does not prevent two
+    concurrent callers from both observing None)."""
     return db.scalar(
         select(Flag).where(
             Flag.student_id == student_id,
@@ -117,6 +120,57 @@ def get_open_flag(db: Session, student_id: uuid.UUID, flag_type: FlagType) -> Fl
             Flag.status == FlagStatus.open,
         )
     )
+
+
+def upsert_open_flag(
+    db: Session,
+    *,
+    student_id: uuid.UUID,
+    school_id: uuid.UUID,
+    flag_type: FlagType,
+    risk_score: float,
+) -> Flag:
+    """Race-safe create for a checkin_id=NULL (background-evaluation) flag: at most one OPEN flag
+    per (student_id, type), backed by the partial unique index `uq_flags_open_student_type`
+    (migration d1f6a3c8e952) — `uq_flags_checkin_id` gives no protection here since every row this
+    inserts has `checkin_id=NULL`, and Postgres treats every NULL as distinct under a standard
+    UNIQUE constraint (review Blocker, proven by execution: 2 duplicate open slow_burn flags on the
+    first of 8 concurrent-evaluate iterations without this).
+
+    `INSERT ... ON CONFLICT (student_id, type) WHERE status='open' DO NOTHING`, then
+    `SELECT ... FOR UPDATE` returns the single open row EITHER WAY (ours, or the concurrent
+    winner's, already locked) — the same upsert+lock shape as FR-19-02's
+    `get_or_create_subscription` (upsert-and-converge, not FR-02-01's reject-the-loser: a
+    re-evaluation racing with itself should converge onto the winner's flag, not error)."""
+    db.execute(
+        pg_insert(Flag)
+        .values(
+            student_id=student_id,
+            school_id=school_id,
+            checkin_id=None,
+            type=flag_type,
+            risk_score=risk_score,
+            status=FlagStatus.open,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["student_id", "type"],
+            index_where=text("status = 'open'"),
+        )
+    )
+    flag = db.scalar(
+        select(Flag)
+        .where(
+            Flag.student_id == student_id,
+            Flag.type == flag_type,
+            Flag.status == FlagStatus.open,
+        )
+        .with_for_update()
+    )
+    if flag is None:  # pragma: no cover - the upsert above guarantees a row exists by now
+        raise RuntimeError(
+            f"open-flag upsert invariant violated for student_id={student_id} type={flag_type}"
+        )
+    return flag
 
 
 def create_flag(
