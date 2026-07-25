@@ -1,17 +1,53 @@
-"""Student read endpoint (INFRA-02/03) + parental-consent capture (FR-20-06). Staff-only;
-cross-school/class denied (403) + audited. Thin router — business logic lives in
-src.application.students.services / src.application.compliance.services."""
+"""Student read endpoint (INFRA-02/03) + parental-consent capture (FR-20-06) — both staff-only,
+cross-school/class denied (403) + audited. Also the student's own check-in history (FR-08-01) —
+self-only, `StudentDep`-scoped, no student_id parameter. Thin router — business logic lives in
+src.application.students.services / src.application.compliance.services /
+src.application.checkin.services."""
+import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, status
 
+from src.application.checkin import services as checkin_svc
 from src.application.compliance import services as compliance_svc
 from src.application.students import services as students_svc
-from src.infrastructure.middlewares.auth_middleware import DbDep, StaffDep
+from src.infrastructure.middlewares.auth_middleware import DbDep, StaffDep, StudentDep
+from src.schemas.checkin import HistoryOut, MoodPointOut, ReflectionPointOut
 from src.schemas.compliance import ConsentIn, ConsentOut
 from src.schemas.students import StudentOut
 
+logger = logging.getLogger("youhue.checkin")
 router = APIRouter(prefix="/students", tags=["students"])
+
+
+@router.get(
+    "/me/history",
+    response_model=HistoryOut,
+    responses={
+        status.HTTP_500_INTERNAL_SERVER_ERROR: {
+            "description": "Could not resolve the caller's own history.",
+        },
+    },
+)
+def get_my_history(student: StudentDep, db: DbDep) -> HistoryOut:
+    """FR-08-01 (SC-025) — the CALLER's own moods over time + own reflections. Empty lists (never
+    an error) before the caller has any check-ins (Scenario 3). `StudentDep` resolves the caller off
+    the session — there is no student_id anywhere in this route, so a student can never reach
+    another student's history (Scenario 2)."""
+    try:
+        moods, reflections = checkin_svc.get_student_history(db, student)
+    except Exception as exc:  # noqa: BLE001 — last-resort guard, never leak an unhandled 500
+        logger.exception("fr_08_01_error action=get_my_history student_id=%s", student.id)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not resolve your history"
+        ) from exc
+    logger.info(
+        "fr_08_01_success action=get_my_history student_id=%s checkins=%s", student.id, len(moods)
+    )
+    return HistoryOut(
+        moods_over_time=[MoodPointOut(local_date=d, mood_value=v) for d, v in moods],
+        reflections=[ReflectionPointOut(local_date=d, reflection_text=t) for d, t in reflections],
+    )
 
 
 @router.get("/{student_id}", response_model=StudentOut)

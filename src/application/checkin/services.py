@@ -191,6 +191,34 @@ def get_checkin_config(student: Student) -> tuple[Literal["simple", "rich"], lis
     return mode, mood_set_for_band(student.age_band), simple
 
 
+# =================================================================================================
+# FR-08-01 — GET /api/v1/students/me/history: the caller's OWN moods over time + own reflections.
+# `student` is resolved by `StudentDep` off the session, never a request parameter (same
+# self-only-scope shape as `get_checkin_config` above) — a student can never reach another
+# student's history, structurally, not merely by a runtime check (ticket Scenario 2). No business
+# rule can reject an authenticated caller reading their own history, so `fr_08_01_rejected`/
+# `fr_08_01_forbidden` have no reachable call site, same documented-absence posture as
+# `get_checkin_config`'s note above; only `fr_08_01_success`/`fr_08_01_error` are emitted (router).
+# =================================================================================================
+
+
+def get_student_history(
+    db: Session, student: Student
+) -> tuple[list[tuple[str, int]], list[tuple[str, str]]]:
+    """Returns `(moods_over_time, reflections)` for `student`'s own check-ins, newest first.
+    `reflections` includes only rows with a non-empty `reflection_text` — a check-in's reflection is
+    optional, so a mood-only day contributes to `moods_over_time` but not `reflections`. Both are
+    empty lists (never an error) when the student has no check-ins yet (ticket Scenario 3)."""
+    rows = checkin_db.list_checkins_for_student(db, student.id)
+    moods = [(row.local_date.isoformat(), row.mood_value) for row in rows]
+    reflections = [
+        (row.local_date.isoformat(), row.reflection_text)
+        for row in rows
+        if row.reflection_text and row.reflection_text.strip()
+    ]
+    return moods, reflections
+
+
 def submit_checkin(
     db: Session, student: Student, mood_value: int, reflection_text: str | None
 ) -> tuple[CheckIn, bool]:

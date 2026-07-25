@@ -51,6 +51,29 @@ class CheckInOut(BaseModel):
     activity_offer: ActivityOfferOut | None = None
 
 
+class MoodPointOut(BaseModel):
+    """FR-08-01 — one point on the caller's own mood-over-time history."""
+
+    local_date: str
+    mood_value: int
+
+
+class ReflectionPointOut(BaseModel):
+    """FR-08-01 — one of the caller's own reflections. Only check-ins that actually carry a
+    non-empty `reflection_text` appear here (reflection is optional per check-in)."""
+
+    local_date: str
+    reflection_text: str
+
+
+class HistoryOut(BaseModel):
+    """FR-08-01 — `GET /api/v1/students/me/history`: the CALLER's own moods over time + their own
+    reflections. Both lists are empty (never an error) before the caller has any check-ins."""
+
+    moods_over_time: list[MoodPointOut]
+    reflections: list[ReflectionPointOut]
+
+
 class CheckInConfigOut(BaseModel):
     """FR-04-03 — `GET /api/v1/check-ins/config`: the CALLER's own age-matched check-in config.
     Supersedes FR-04-01's narrower `GET /check-ins/mood-set` (same `mood_set` data, now carried

@@ -49,6 +49,20 @@ def set_checkin_settings(
     return row
 
 
+def list_checkins_for_student(db: Session, student_id: uuid.UUID) -> list[CheckIn]:
+    """FR-08-01 — every check-in `student_id` has ever submitted, newest first. Scoped by
+    `student_id` alone (indexed, `ix_checkins_student_id`) — the caller (`StudentDep`) has already
+    resolved this to the SIGNED-IN student's own id off the session; there is no student_id
+    parameter anywhere in the request, so this can never be called with another student's id."""
+    return list(
+        db.scalars(
+            select(CheckIn)
+            .where(CheckIn.student_id == student_id)
+            .order_by(CheckIn.local_date.desc(), CheckIn.submitted_at.desc())
+        )
+    )
+
+
 def list_checkins_for_student_between(
     db: Session, student_id: uuid.UUID, start: datetime, end: datetime
 ) -> list[CheckIn]:
