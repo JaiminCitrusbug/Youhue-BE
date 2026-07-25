@@ -74,13 +74,20 @@ def create_checkin(
     reflection_text: str | None,
     within_window: bool,
     local_date: date,
+    captured_offline: bool = False,
+    client_entry_id: str | None = None,
 ) -> CheckIn:
     """`local_date` (school-LOCAL calendar day, caller-computed) backs
     `uq_checkins_student_local_date` — the DB-level backstop for "one check-in per student per day"
     (FR-04-01 review remediation, Finding 1: the read-then-write check alone loses a genuine
-    concurrent race). The caller (`submit_checkin`) is responsible for catching the resulting
-    `IntegrityError` on a concurrent duplicate and translating it to the same 409 the sequential
-    duplicate path already returns."""
+    concurrent race). The caller (`submit_checkin`/`sync_checkin`) is responsible for catching the
+    resulting `IntegrityError` on a concurrent duplicate and translating it to the appropriate
+    response (see each caller's own docstring).
+
+    `client_entry_id` (FR-04-06, offline sync only) backs `ix_checkins_client_entry_id` — the
+    DB-level backstop for the sync endpoint's idempotency guarantee, same reasoning as
+    `local_date`/its constraint above: the read-then-write check in `sync_checkin` cannot see a
+    genuinely concurrent second sync of the same offline entry."""
     row = CheckIn(
         student_id=student_id,
         school_id=school_id,
@@ -88,10 +95,27 @@ def create_checkin(
         reflection_text=reflection_text,
         within_window=within_window,
         local_date=local_date,
+        captured_offline=captured_offline,
+        client_entry_id=client_entry_id,
     )
     db.add(row)
     db.flush()
     return row
+
+
+def get_checkin_by_client_entry_id(
+    db: Session, student_id: uuid.UUID, client_entry_id: str
+) -> CheckIn | None:
+    """FR-04-06 — the offline sync idempotency lookup: has THIS student already synced an entry
+    under this `client_entry_id`? Scoped by `student_id` too (not just the globally-unique
+    `client_entry_id`) so a lookup can never leak or return another student's row even in a
+    hypothetical client_entry_id collision across students (the client generates this ID, so a
+    cross-student collision is not impossible the way a server-generated UUID's would be)."""
+    return db.scalar(
+        select(CheckIn).where(
+            CheckIn.student_id == student_id, CheckIn.client_entry_id == client_entry_id
+        )
+    )
 
 
 def get_unscored_for_update(db: Session) -> list[CheckIn]:

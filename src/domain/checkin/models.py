@@ -47,6 +47,8 @@ class CheckIn(Base):
             "student_id", "local_date", name="uq_checkins_student_local_date"
         ),
     )
+    # `client_entry_id` (FR-04-06): the offline sync idempotency key. Column + unique index are
+    # added by migration `d1e9a4b73f02`.
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     student_id: Mapped[uuid.UUID] = mapped_column(
@@ -67,6 +69,7 @@ class CheckIn(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     local_date: Mapped[date] = mapped_column(Date, nullable=False)
+    client_entry_id: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class Activity(Base):

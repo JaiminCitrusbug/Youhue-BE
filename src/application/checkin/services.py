@@ -313,3 +313,127 @@ def submit_checkin(
         "fr_04_01_success action=submit_checkin student_id=%s checkin_id=%s", student.id, row.id
     )
     return row, True
+
+
+# =================================================================================================
+# FR-04-06 — POST /api/v1/check-ins/sync: submit a check-in that was captured while offline.
+# `client_entry_id` (client-generated) is the idempotency key: a retried sync of the SAME entry
+# (e.g. the client re-fires it because it never saw the first response) must return the SAME row,
+# never create a second one — ticket §Interaction contract ("never double-creates" [BR-05]).
+# Do NOT weaken the access-window rule: an offline entry is evaluated against FR-07-03 at SYNC time
+# (when the guard can actually run against real server time), not against whenever it was captured
+# on the device — so the full guard chain from `submit_checkin` runs on a entry's FIRST sync, same
+# as a normal online submission. Only a RETRY of an already-persisted `client_entry_id` skips the
+# guards and returns the existing row — re-validating a request that already succeeded would be
+# wrong (e.g. the window could have since closed).
+# =================================================================================================
+
+
+def sync_checkin(
+    db: Session,
+    student: Student,
+    client_entry_id: str,
+    mood_value: int,
+    reflection_text: str | None,
+) -> tuple[CheckIn, bool]:
+    """Returns `(row, created)` — `created=False` on an idempotent replay (the SAME
+    `client_entry_id` was already synced; the existing row is returned, no guards re-run).
+
+    Concurrency: a genuinely concurrent second sync call carrying the SAME `client_entry_id` (e.g.
+    a background-sync event and a foreground reconnect handler both firing) can both pass the
+    up-front idempotency lookup before either has written. The DB-level backstop is
+    `ix_checkins_client_entry_id` (migration `d1e9a4b73f02`); on the resulting `IntegrityError` this
+    re-fetches by `client_entry_id` and converges onto the winner's row (FR-19-02's
+    upsert-and-converge shape, not FR-02-01/FR-04-01's hard-reject shape) — this is the SAME
+    idempotency key racing itself, not a semantically new duplicate, so the loser should
+    transparently see the winner's result rather than error. A DIFFERENT `client_entry_id` landing
+    on the SAME school-local day still hits `uq_checkins_student_local_date` and is hard-rejected
+    with the same 409 `submit_checkin` uses — the one-check-in-per-day domain rule is unchanged by
+    this ticket.
+    """
+    existing = checkin_db.get_checkin_by_client_entry_id(db, student.id, client_entry_id)
+    if existing is not None:
+        logger.info(
+            "fr_04_06_success action=sync_checkin student_id=%s checkin_id=%s "
+            "reason=idempotent_replay", student.id, existing.id,
+        )
+        return existing, False
+
+    try:
+        require_within_access_window(db, student.school_id)
+    except HTTPException:
+        logger.warning(
+            "fr_04_06_forbidden action=sync_checkin student_id=%s reason=access_window",
+            student.id,
+        )
+        raise
+
+    compliance_svc.require_verified_consent(db, student.id)
+
+    allowed = mood_set_for_band(student.age_band)
+    if mood_value not in allowed:
+        logger.info(
+            "fr_04_06_rejected action=sync_checkin student_id=%s reason=invalid_mood mood=%s",
+            student.id, mood_value,
+        )
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, _INVALID_MOOD)
+
+    settings_row = checkin_db.get_checkin_settings(db, student.school_id)
+    reflection_required = settings_row.require_reflection if settings_row is not None else False
+    has_reflection = bool(reflection_text and reflection_text.strip())
+    if reflection_required and not has_reflection:
+        logger.info(
+            "fr_04_06_rejected action=sync_checkin student_id=%s reason=reflection_required",
+            student.id,
+        )
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, _REFLECTION_REQUIRED)
+
+    config = org_db.get_calendar_config(db, student.school_id)
+    if config is None:  # pragma: no cover — require_within_access_window above already requires one
+        logger.error(
+            "fr_04_06_error action=sync_checkin student_id=%s reason=no_calendar_config",
+            student.id,
+        )
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Check-in configuration is invalid"
+        )
+
+    tz = ZoneInfo(config.timezone)
+    local_now = _to_school_local(None, tz)
+    day_start = datetime.combine(local_now.date(), time.min, tzinfo=tz)
+
+    try:
+        row = checkin_db.create_checkin(
+            db,
+            student_id=student.id,
+            school_id=student.school_id,
+            mood_value=mood_value,
+            reflection_text=reflection_text,
+            within_window=True,
+            local_date=day_start.date(),
+            captured_offline=True,
+            client_entry_id=client_entry_id,
+        )
+    except IntegrityError as exc:
+        db.rollback()
+        # Which constraint fired? Re-check by client_entry_id: if found, this was the SAME entry
+        # racing itself (ix_checkins_client_entry_id) -> converge on the winner (idempotent, not an
+        # error). If not found, it was uq_checkins_student_local_date -> a genuinely different entry
+        # for the same day -> hard-reject, same as submit_checkin.
+        raced = checkin_db.get_checkin_by_client_entry_id(db, student.id, client_entry_id)
+        if raced is not None:
+            logger.info(
+                "fr_04_06_success action=sync_checkin student_id=%s checkin_id=%s "
+                "reason=idempotent_replay event=race", student.id, raced.id,
+            )
+            return raced, False
+        logger.info(
+            "fr_04_06_rejected action=sync_checkin student_id=%s reason=duplicate_day event=race",
+            student.id,
+        )
+        raise HTTPException(status.HTTP_409_CONFLICT, _ALREADY_CHECKED_IN) from exc
+
+    logger.info(
+        "fr_04_06_success action=sync_checkin student_id=%s checkin_id=%s", student.id, row.id
+    )
+    return row, True

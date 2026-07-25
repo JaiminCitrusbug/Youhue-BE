@@ -156,6 +156,88 @@ def test_sequential_exact_retry_still_idempotent_201(client, db, make_school, ma
     assert db.query(CheckIn).filter(CheckIn.student_id == student.id).count() == 1
 
 
+def _sync_race_attempt(
+    engine, student_id: uuid.UUID, client_entry_id: str, barrier: threading.Barrier,
+    results: dict, key: str,
+) -> None:
+    """FR-04-06 — same real-concurrency shape as `_race_attempt` above, but racing two
+    `sync_checkin` calls that carry the SAME `client_entry_id` (e.g. a background-sync event and a
+    foreground reconnect handler both firing at once for the same retained offline entry)."""
+    from src.application.checkin import services as sync_svc
+
+    Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    session = Session()
+    try:
+        student = session.get(Student, student_id)
+        barrier.wait()
+        row, created = sync_svc.sync_checkin(session, student, client_entry_id, 4, None)
+        session.commit()
+        results[key] = ("success", (row.id, created))
+    except HTTPException as exc:
+        session.rollback()
+        results[key] = ("http_exception", exc.status_code)
+    except Exception as exc:  # noqa: BLE001 — a bare IntegrityError leaking here IS the failure mode
+        session.rollback()
+        results[key] = ("unhandled_exception", repr(exc))
+    finally:
+        session.close()
+
+
+def test_concurrent_sync_same_entry_id_never_double_creates(db, make_school, make_student):
+    """FR-04-06 review Blocker (`docs/reviews/FR-12-03.md`-class race, 6th instance this codebase
+    has hit): two genuinely concurrent syncs of the SAME `client_entry_id` must converge onto ONE
+    row, never two, and never a raw `IntegrityError`. Run >=10 times."""
+    school = make_school(code="RACE-SYNC-1")
+    _open_all_day_window(db, school)
+
+    engine = create_engine(settings.database_url_test, future=True, pool_size=5, max_overflow=5)
+    try:
+        for i in range(_ITERATIONS):
+            student = make_student(school, name=f"SyncRacer{i}")
+            _verify_consent(db, student)
+            entry_id = f"race-entry-{i}"
+
+            barrier = threading.Barrier(2)
+            results: dict = {}
+            t_a = threading.Thread(
+                target=_sync_race_attempt,
+                args=(engine, student.id, entry_id, barrier, results, "a"),
+            )
+            t_b = threading.Thread(
+                target=_sync_race_attempt,
+                args=(engine, student.id, entry_id, barrier, results, "b"),
+            )
+            t_a.start()
+            t_b.start()
+            t_a.join(timeout=30)
+            t_b.join(timeout=30)
+
+            assert set(results) == {"a", "b"}, f"iteration {i}: a thread never finished: {results}"
+            kinds = [v[0] for v in results.values()]
+            assert kinds == ["success", "success"], (
+                f"iteration {i}: both racers must converge to success (the idempotency key means "
+                f"neither is a 'genuine duplicate' to reject) — got {results}. An "
+                f"'unhandled_exception' means a raw IntegrityError leaked past the fix."
+            )
+
+            row_ids = {v[1][0] for v in results.values()}
+            assert len(row_ids) == 1, (
+                f"iteration {i}: both racers must resolve to the SAME row id, got {row_ids} — "
+                f"the race produced two rows for one client_entry_id"
+            )
+
+            count = db.execute(
+                text("SELECT COUNT(*) FROM check_ins WHERE student_id = :sid"),
+                {"sid": str(student.id)},
+            ).scalar()
+            assert count == 1, (
+                f"iteration {i}: expected exactly one CheckIn row for student {student.id}, "
+                f"found {count} — the client_entry_id race is NOT closed"
+            )
+    finally:
+        engine.dispose()
+
+
 def test_sequential_different_mood_still_409_original_preserved(
     client, db, make_school, make_student
 ):

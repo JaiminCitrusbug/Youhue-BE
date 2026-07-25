@@ -35,6 +35,22 @@ in-process and never fails the check-in response on a scoring error.
   -> test_submit_clean_reflection_does_not_flag
   -> test_idempotent_replay_does_not_rescore
   -> test_scoring_failure_never_fails_checkin_response
+
+FR-04-06 — POST /api/v1/check-ins/sync (offline check-in sync, client_entry_id idempotency key):
+  S1/S2 A first-time sync creates the row, captured_offline=True, scored like a normal submit -> 201.
+       -> test_sync_first_time_creates_offline_row
+       -> test_sync_scores_like_a_normal_submit
+  S3   A retried sync of the SAME client_entry_id never double-creates -> 200, same row.
+       -> test_sync_retry_same_entry_id_is_idempotent_200
+  MN   A DIFFERENT client_entry_id landing on the same day is still a hard 409 (one-per-day unchanged).
+       -> test_sync_different_entry_id_same_day_is_409
+  MN   Access window / consent / mood-band / reflection-required all still apply on a FIRST sync
+       (evaluated at sync time, not capture time — ticket "do not weaken the access-window rule").
+       -> test_sync_outside_access_window_is_403
+       -> test_sync_invalid_mood_is_422
+       -> test_sync_reflection_required_blocks_without_reflection
+  MN   A request body's client_entry_id is the only new field vs the online submit shape.
+       -> test_sync_body_shape
 """
 from datetime import time
 
@@ -46,9 +62,11 @@ from src.constants.enums import ParentalConsentStatus, StudentAgeBand
 from src.domain.checkin import services as checkin_db
 from src.domain.compliance import services as compliance_db
 from src.domain.org.models import CalendarConfig
+from src.schemas.checkin import CheckInSyncCreate
 
 CHECKINS = "/api/v1/check-ins"
 CHECKIN_CONFIG = "/api/v1/check-ins/config"
+CHECKIN_SYNC = "/api/v1/check-ins/sync"
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -445,6 +463,125 @@ def test_scoring_failure_never_fails_checkin_response(
     assert r.status_code == 201  # scoring failure never surfaces as a failed check-in
     row = db.get(CheckIn, r.json()["checkin_id"])
     assert row.scored is False  # left queued for the process_pending worker's retry/dead-letter
+
+
+# ---- FR-04-06 — POST /check-ins/sync (offline sync, client_entry_id idempotency) -----------------
+
+
+def test_sync_body_shape():
+    assert set(CheckInSyncCreate.model_fields) == {
+        "client_entry_id", "mood_value", "reflection_text",
+    }
+
+
+def test_sync_first_time_creates_offline_row(client, db, make_school, make_student):
+    from src.domain.checkin.models import CheckIn
+
+    school = make_school(code="SYN-1")
+    student = make_student(school)
+    token = _ready(db, client, school, student)
+    r = client.post(
+        CHECKIN_SYNC,
+        json={"client_entry_id": "entry-1", "mood_value": 4, "reflection_text": "offline day"},
+        headers=_auth(token),
+    )
+    assert r.status_code == 201
+    row = db.get(CheckIn, r.json()["checkin_id"])
+    assert row.captured_offline is True
+    assert row.client_entry_id == "entry-1"
+    assert row.mood_value == 4
+    assert row.reflection_text == "offline day"
+
+
+def test_sync_scores_like_a_normal_submit(client, db, make_school, make_student):
+    from src.domain.risk.models import Flag
+
+    school = make_school(code="SYN-2")
+    student = make_student(school)
+    token = _ready(db, client, school, student)
+    r = client.post(
+        CHECKIN_SYNC,
+        json={"client_entry_id": "entry-2", "mood_value": 3, "reflection_text": "i feel unsafe"},
+        headers=_auth(token),
+    )
+    assert r.status_code == 201
+    checkin_id = r.json()["checkin_id"]
+    flag = db.query(Flag).filter(Flag.checkin_id == checkin_id).first()
+    assert flag is not None and float(flag.risk_score) == 0.90
+
+
+def test_sync_retry_same_entry_id_is_idempotent_200(client, db, make_school, make_student):
+    from src.domain.checkin.models import CheckIn
+
+    school = make_school(code="SYN-3")
+    student = make_student(school)
+    token = _ready(db, client, school, student)
+    body = {"client_entry_id": "entry-3", "mood_value": 4, "reflection_text": "same"}
+    first = client.post(CHECKIN_SYNC, json=body, headers=_auth(token))
+    retry = client.post(CHECKIN_SYNC, json=body, headers=_auth(token))
+    assert first.status_code == 201
+    assert retry.status_code == 200
+    assert first.json()["checkin_id"] == retry.json()["checkin_id"]
+    assert db.query(CheckIn).filter(CheckIn.student_id == student.id).count() == 1
+
+
+def test_sync_different_entry_id_same_day_is_409(client, db, make_school, make_student):
+    school = make_school(code="SYN-4")
+    student = make_student(school)
+    token = _ready(db, client, school, student)
+    first = client.post(
+        CHECKIN_SYNC,
+        json={"client_entry_id": "entry-4a", "mood_value": 4},
+        headers=_auth(token),
+    )
+    assert first.status_code == 201
+    second = client.post(
+        CHECKIN_SYNC,
+        json={"client_entry_id": "entry-4b", "mood_value": 1},
+        headers=_auth(token),
+    )
+    assert second.status_code == 409
+
+
+def test_sync_outside_access_window_is_403(client, db, make_school, make_student):
+    from src.domain.checkin.models import CheckIn
+
+    school = make_school(code="SYN-5")
+    student = make_student(school)
+    _verify_consent(db, student)
+    row = CalendarConfig(
+        school_id=school.id, window_start=time(3, 0), window_end=time(3, 1), timezone="UTC"
+    )
+    db.add(row)
+    db.commit()
+    token = _student_token(client, school, student)
+    r = client.post(
+        CHECKIN_SYNC, json={"client_entry_id": "entry-5", "mood_value": 4}, headers=_auth(token)
+    )
+    assert r.status_code == 403
+    assert db.query(CheckIn).count() == 0
+
+
+def test_sync_invalid_mood_is_422(client, db, make_school, make_student):
+    school = make_school(code="SYN-6")
+    student = make_student(school, age_band=StudentAgeBand.b5_7)
+    token = _ready(db, client, school, student)
+    r = client.post(
+        CHECKIN_SYNC, json={"client_entry_id": "entry-6", "mood_value": 0}, headers=_auth(token)
+    )
+    assert r.status_code == 422
+
+
+def test_sync_reflection_required_blocks_without_reflection(client, db, make_school, make_student):
+    school = make_school(code="SYN-7")
+    student = make_student(school)
+    token = _ready(db, client, school, student)
+    checkin_db.set_checkin_settings(db, school.id, require_reflection=True)
+    db.commit()
+    r = client.post(
+        CHECKIN_SYNC, json={"client_entry_id": "entry-7", "mood_value": 3}, headers=_auth(token)
+    )
+    assert r.status_code == 422
 
 
 def test_submit_checkin_guard_order_window_before_consent(db, make_school, make_student):

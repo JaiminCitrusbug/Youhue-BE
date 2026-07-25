@@ -1,4 +1,5 @@
-"""FR-04-01 — daily check-in submit shapes. FR-04-03 — age-banded check-in config shape."""
+"""FR-04-01 — daily check-in submit shapes. FR-04-03 — age-banded check-in config shape.
+FR-04-06 — offline sync shape."""
 import uuid
 from typing import Literal
 
@@ -18,6 +19,18 @@ class CheckInCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    mood_value: int = Field(ge=0, le=5)
+    reflection_text: str | None = None
+
+
+class CheckInSyncCreate(BaseModel):
+    """FR-04-06 — `POST /api/v1/check-ins/sync` body. `client_entry_id` is the client-generated
+    idempotency key (e.g. a UUID minted when the entry is first captured offline) — a retried sync
+    of the same entry must carry the SAME value so the server can recognize the replay."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    client_entry_id: str = Field(min_length=1, max_length=100)
     mood_value: int = Field(ge=0, le=5)
     reflection_text: str | None = None
 
