@@ -126,6 +126,32 @@ def score_checkin(db: Session, checkin: CheckIn) -> ScoreResult:
     return ScoreResult(True, risk_score, matched, flag.id)
 
 
+def evaluate_slow_burn(db: Session, student_id: uuid.UUID, school_id: uuid.UUID) -> bool:
+    """FR-12-03: on-demand/scheduled slow-burn evaluation over a student's EXISTING check-in
+    history — independent of any single submission (unlike `score_checkin`, which only evaluates
+    the slow-burn trend inline when a NEW check-in lands). Lets a scheduled system process catch a
+    quiet decline even on a day the student doesn't check in at all.
+
+    Idempotent: does not raise a second slow_burn flag while one is already open for the student
+    (a checkin_id-keyed uniqueness constraint doesn't apply here since this call has no checkin to
+    anchor to — checkin_id is left null on the created flag).
+    """
+    if risk_db.get_open_flag(db, student_id, FlagType.slow_burn) is not None:
+        return True
+    score = detect_slow_burn(db, student_id)
+    if score < settings.risk_triage_threshold:
+        return False
+    risk_db.create_flag(
+        db,
+        student_id=student_id,
+        school_id=school_id,
+        checkin_id=None,
+        flag_type=FlagType.slow_burn,
+        risk_score=score,
+    )
+    return True
+
+
 def process_pending(db: Session) -> int:
     """Worker pass: score unscored check-ins with a per-item commit so one poison item never sinks
     the batch. A scoring error is retried (bounded) and, once the cap is hit, dead-lettered and

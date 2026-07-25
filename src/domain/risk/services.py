@@ -107,6 +107,18 @@ def get_flag_by_checkin(db: Session, checkin_id: uuid.UUID) -> Flag | None:
     return db.scalar(select(Flag).where(Flag.checkin_id == checkin_id))
 
 
+def get_open_flag(db: Session, student_id: uuid.UUID, flag_type: FlagType) -> Flag | None:
+    """The student's own OPEN flag of this type, if any (FR-12-03 idempotency: a background
+    slow-burn evaluation while one is already open must not raise a second one)."""
+    return db.scalar(
+        select(Flag).where(
+            Flag.student_id == student_id,
+            Flag.type == flag_type,
+            Flag.status == FlagStatus.open,
+        )
+    )
+
+
 def create_flag(
     db: Session,
     *,

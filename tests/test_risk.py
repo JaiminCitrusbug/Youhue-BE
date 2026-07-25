@@ -334,3 +334,96 @@ def test_score_endpoint_denies_student_session(client, db, make_school, make_stu
     ).json()["session_token"]
     r = client.post("/api/v1/risk/score", json={"checkin_id": str(c.id)}, headers=_auth(token))
     assert r.status_code == 403
+
+
+# ---- POST /api/v1/risk/slow-burn/evaluate (FR-12-03: on-demand/scheduled trend re-check) ----
+
+
+def test_slow_burn_evaluate_flags_persistent_low_trend(client, db, make_school, make_staff, make_student):
+    school = make_school()
+    make_staff(school)
+    student = make_student(school)
+    for i in range(1, settings.slowburn_window_days):
+        _mk_checkin(db, student, school, mood=1, when=datetime.now(UTC) - timedelta(days=i))
+    _mk_checkin(db, student, school, mood=1)  # today's low check-in — no scoring wired here
+    db.commit()
+    assert db.query(Flag).count() == 0  # nothing has evaluated this student's trend yet
+
+    r = client.post(
+        "/api/v1/risk/slow-burn/evaluate",
+        json={"student_id": str(student.id)},
+        headers=_auth(_staff_token(client)),
+    )
+    assert r.status_code == 200
+    assert r.json() == {"flag_raised": True}
+    flag = db.query(Flag).filter(Flag.type == FlagType.slow_burn).one()
+    assert flag.checkin_id is None and float(flag.risk_score) == 0.70 and flag.band is None
+
+    # idempotent: a repeat evaluate call while the flag is still open raises no second one
+    r2 = client.post(
+        "/api/v1/risk/slow-burn/evaluate",
+        json={"student_id": str(student.id)},
+        headers=_auth(_staff_token(client)),
+    )
+    assert r2.status_code == 200 and r2.json() == {"flag_raised": True}
+    assert db.query(Flag).count() == 1
+
+
+def test_slow_burn_evaluate_no_flag_on_recovered_trend(client, db, make_school, make_staff, make_student):
+    school = make_school()
+    make_staff(school)
+    student = make_student(school)
+    for i in range(settings.slowburn_window_days):
+        _mk_checkin(db, student, school, mood=1, when=datetime.now(UTC) - timedelta(days=i + 1))
+    _mk_checkin(db, student, school, mood=5)  # recovered — most recent mood is back above threshold
+    db.commit()
+
+    r = client.post(
+        "/api/v1/risk/slow-burn/evaluate",
+        json={"student_id": str(student.id)},
+        headers=_auth(_staff_token(client)),
+    )
+    assert r.status_code == 200
+    assert r.json() == {"flag_raised": False}
+    assert db.query(Flag).count() == 0
+
+
+@pytest.mark.authz
+def test_slow_burn_evaluate_rejects_cross_school(client, make_school, make_staff, make_student):
+    school_a = make_school(code="AAA-2", name="A2")
+    make_staff(school_a, email="a2@oakwood.edu")
+    school_b = make_school(code="BBB-3", name="B3")
+    student_b = make_student(school_b)
+    r = client.post(
+        "/api/v1/risk/slow-burn/evaluate",
+        json={"student_id": str(student_b.id)},
+        headers=_auth(_staff_token(client, "a2@oakwood.edu")),
+    )
+    assert r.status_code == 403
+
+
+def test_slow_burn_evaluate_unknown_student_404(client, make_school, make_staff):
+    school = make_school()
+    make_staff(school)
+    r = client.post(
+        "/api/v1/risk/slow-burn/evaluate",
+        json={"student_id": str(uuid.uuid4())},
+        headers=_auth(_staff_token(client)),
+    )
+    assert r.status_code == 404
+
+
+@pytest.mark.authz
+def test_slow_burn_evaluate_denies_student_session(client, make_school, make_student):
+    school = make_school(code="OAK-8")
+    student = make_student(school)
+    token = client.post(
+        "/api/v1/auth/student/sign-in",
+        json={"school_or_class_code": "OAK-8", "student_id": str(student.id)},
+    ).json()["session_token"]
+    r = client.post(
+        "/api/v1/risk/slow-burn/evaluate",
+        json={"student_id": str(student.id)},
+        headers=_auth(token),
+    )
+    assert r.status_code == 403

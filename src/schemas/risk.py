@@ -12,3 +12,11 @@ class ScoreResponse(BaseModel):
     flagged: bool
     risk_score: float
     matched_terms: list[str]
+
+
+class SlowBurnEvaluateRequest(BaseModel):
+    student_id: uuid.UUID
+
+
+class SlowBurnEvaluateResponse(BaseModel):
+    flag_raised: bool
