@@ -27,6 +27,13 @@ Every ticket Must-not / Scenario has a test that fails if the guarantee is remov
        -> test_activity_offer_is_always_null
   MN-7 The mood set is per-age-band and config-driven, not hard-coded.
        -> test_mood_set_endpoint_reflects_age_band_config
+
+FR-12-01 (closes DEF-005 — the internal caller/auth contract): a real submit scores the check-in
+in-process and never fails the check-in response on a scoring error.
+  -> test_submit_scores_checkin_and_creates_flag
+  -> test_submit_clean_reflection_does_not_flag
+  -> test_idempotent_replay_does_not_rescore
+  -> test_scoring_failure_never_fails_checkin_response
 """
 from datetime import time
 
@@ -334,6 +341,74 @@ def test_mood_set_for_band_is_config_driven_not_hardcoded(monkeypatch):
 
 
 # ---- service-layer direct coverage (guard-order + 500 defensive branch) --------------------------
+
+
+# ---- FR-12-01 — scoring wired into the real submit path (closes DEF-005) -------------------------
+
+
+def test_submit_scores_checkin_and_creates_flag(client, db, make_school, make_student):
+    from src.domain.risk.models import Flag
+
+    school = make_school(code="CKS-19")
+    student = make_student(school)
+    token = _ready(db, client, school, student)
+    r = client.post(
+        CHECKINS, json={"mood_value": 3, "reflection_text": "i feel unsafe"}, headers=_auth(token)
+    )
+    assert r.status_code == 201
+    checkin_id = r.json()["checkin_id"]
+    flag = db.query(Flag).filter(Flag.checkin_id == checkin_id).first()
+    assert flag is not None and float(flag.risk_score) == 0.90 and flag.band is None
+
+
+def test_submit_clean_reflection_does_not_flag(client, db, make_school, make_student):
+    from src.domain.checkin.models import CheckIn
+    from src.domain.risk.models import Flag
+
+    school = make_school(code="CKS-20")
+    student = make_student(school)
+    token = _ready(db, client, school, student)
+    r = client.post(
+        CHECKINS, json={"mood_value": 4, "reflection_text": "great day"}, headers=_auth(token)
+    )
+    assert r.status_code == 201
+    row = db.get(CheckIn, r.json()["checkin_id"])
+    assert row.scored is True
+    assert db.query(Flag).filter(Flag.checkin_id == row.id).count() == 0
+
+
+def test_idempotent_replay_does_not_rescore(client, db, make_school, make_student):
+    from src.domain.risk.models import Flag
+
+    school = make_school(code="CKS-21")
+    student = make_student(school)
+    token = _ready(db, client, school, student)
+    body = {"mood_value": 3, "reflection_text": "i feel hopeless"}
+    first = client.post(CHECKINS, json=body, headers=_auth(token))
+    retry = client.post(CHECKINS, json=body, headers=_auth(token))
+    assert first.status_code == 201 and retry.status_code == 201
+    checkin_id = first.json()["checkin_id"]
+    assert db.query(Flag).filter(Flag.checkin_id == checkin_id).count() == 1  # no duplicate flag
+
+
+def test_scoring_failure_never_fails_checkin_response(
+    client, db, make_school, make_student, monkeypatch
+):
+    from src.domain.checkin.models import CheckIn
+    from src.routers import checkins as checkins_router
+
+    school = make_school(code="CKS-22")
+    student = make_student(school)
+    token = _ready(db, client, school, student)
+
+    def boom(_db, _checkin):
+        raise RuntimeError("scoring exploded")
+
+    monkeypatch.setattr(checkins_router.risk_svc, "score_checkin", boom)
+    r = client.post(CHECKINS, json={"mood_value": 4}, headers=_auth(token))
+    assert r.status_code == 201  # scoring failure never surfaces as a failed check-in
+    row = db.get(CheckIn, r.json()["checkin_id"])
+    assert row.scored is False  # left queued for the process_pending worker's retry/dead-letter
 
 
 def test_submit_checkin_guard_order_window_before_consent(db, make_school, make_student):

@@ -11,6 +11,7 @@ from src.application.risk import services as risk
 from src.constants.enums import FlagType
 from src.domain.billing.models import Notification
 from src.domain.checkin.models import CheckIn
+from src.domain.risk import services as risk_db
 from src.domain.risk.models import ConcernWordList, Flag
 
 STAFF_SIGNIN = "/api/v1/auth/staff/sign-in"
@@ -183,6 +184,20 @@ def test_slow_burn_day_count_is_configurable(db, make_school, make_student, monk
 
 def test_risk_score_owner_registered():
     assert derived.owner_name("flag.risk_score") == "combine_risk_score"
+
+
+def test_default_change_never_displaces_existing_school_override(db, make_school, make_student):
+    # GATE G-6, negative direction (ticket §Interaction contract): a school's own override always
+    # wins, so a LATER change to the platform default must never reach a school that already has one.
+    school = make_school()
+    student = make_student(school)
+    db.add(ConcernWordList(school_id=None, words=["hopeless"], is_default=True))
+    db.add(ConcernWordList(school_id=school.id, words=["banana"], is_default=False))
+    db.commit()
+    risk_db.set_default_concern_word_list(db, ["mango"])  # default changes AFTER the override exists
+    db.commit()
+    c = _mk_checkin(db, student, school, reflection="i feel hopeless")  # old default word only
+    assert risk.score_checkin(db, c).flagged is False  # override list has neither "hopeless" nor "mango"
 
 
 def test_concern_words_do_not_leak_across_schools(db, make_school, make_student):
