@@ -1,14 +1,20 @@
 """Org domain services — class-access / membership queries only."""
 import uuid
 from collections.abc import Sequence
-from datetime import date, time
+from datetime import date, datetime, time
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.constants.enums import SchoolStatus, StaffClassScope
+from src.constants.enums import InvitationStatus, SchoolStatus, StaffClassScope
 from src.domain.identity.models import School
-from src.domain.org.models import CalendarConfig, ClassGroup, ClassMembership, StaffClassAccess
+from src.domain.org.models import (
+    CalendarConfig,
+    ClassGroup,
+    ClassMembership,
+    Invitation,
+    StaffClassAccess,
+)
 
 
 def get_class_ids_for_staff_in_school(
@@ -74,6 +80,105 @@ def set_class_access(
     klass.qr_token = qr_token
     db.flush()
     return klass
+
+
+def get_classes_for_staff(
+    db: Session, staff_id: uuid.UUID, school_id: uuid.UUID, scopes: Sequence[StaffClassScope]
+) -> list[ClassGroup]:
+    """Every class the staff member holds ANY of the given access scopes on, in their school —
+    name order for a stable picker (FR-02-03's 'Shared class' select needs the owner's own
+    classes; no prior ticket exposed a class-list read)."""
+    return list(
+        db.scalars(
+            select(ClassGroup)
+            .join(StaffClassAccess, StaffClassAccess.class_id == ClassGroup.id)
+            .where(
+                StaffClassAccess.staff_id == staff_id,
+                ClassGroup.school_id == school_id,
+                StaffClassAccess.scope.in_(list(scopes)),
+            )
+            .order_by(ClassGroup.name.asc())
+        )
+    )
+
+
+def get_staff_class_access(
+    db: Session, staff_id: uuid.UUID, class_id: uuid.UUID
+) -> StaffClassAccess | None:
+    return db.scalar(
+        select(StaffClassAccess).where(
+            StaffClassAccess.staff_id == staff_id, StaffClassAccess.class_id == class_id
+        )
+    )
+
+
+def grant_class_access(
+    db: Session, staff_id: uuid.UUID, class_id: uuid.UUID, scope: StaffClassScope
+) -> StaffClassAccess:
+    """Idempotent: a staff member who already holds ANY access row for this class keeps it
+    unchanged (never downgrades an existing owner to shared) rather than erroring."""
+    access = get_staff_class_access(db, staff_id, class_id)
+    if access is not None:
+        return access
+    access = StaffClassAccess(staff_id=staff_id, class_id=class_id, scope=scope)
+    db.add(access)
+    db.flush()
+    return access
+
+
+def create_invitation(
+    db: Session,
+    *,
+    school_id: uuid.UUID,
+    class_id: uuid.UUID,
+    inviter_id: uuid.UUID,
+    email: str,
+    token: str,
+    expires_at: datetime,
+) -> Invitation:
+    invitation = Invitation(
+        school_id=school_id,
+        class_id=class_id,
+        inviter_id=inviter_id,
+        email=email.lower(),
+        token=token,
+        expires_at=expires_at,
+    )
+    db.add(invitation)
+    db.flush()
+    return invitation
+
+
+def get_invitation(db: Session, invitation_id: uuid.UUID) -> Invitation | None:
+    return db.get(Invitation, invitation_id)
+
+
+def get_invitation_by_token(db: Session, token: str) -> Invitation | None:
+    return db.scalar(select(Invitation).where(Invitation.token == token))
+
+
+def list_invitations_for_class(db: Session, class_id: uuid.UUID) -> list[Invitation]:
+    """Every invitation ever sent for this class (any status) — the 'Pending invitations' table
+    (SC-059) needs real rows to manage, not a fixture."""
+    return list(
+        db.scalars(
+            select(Invitation).where(Invitation.class_id == class_id).order_by(Invitation.email)
+        )
+    )
+
+
+def get_pending_invitation_for_class(
+    db: Session, class_id: uuid.UUID, email: str
+) -> Invitation | None:
+    """An outstanding (not yet accepted/revoked/expired) invitation to this email for this class,
+    if any — the duplicate-invite guard (ticket 409 'already invited')."""
+    return db.scalar(
+        select(Invitation).where(
+            Invitation.class_id == class_id,
+            Invitation.email == email.lower(),
+            Invitation.status.in_((InvitationStatus.invited, InvitationStatus.sent)),
+        )
+    )
 
 
 def get_calendar_config(db: Session, school_id: uuid.UUID) -> CalendarConfig | None:

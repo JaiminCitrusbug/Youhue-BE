@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from src.constants.enums import StaffClassScope
+from src.domain.identity.models import StaffAccount
 from src.domain.org import services as org_db
+from src.schemas.classes import ClassOut, MyClassesResponse
 from src.utils.security import new_join_code, new_url_token
 
 _CLASS_NOT_FOUND = HTTPException(status.HTTP_404_NOT_FOUND, "Class not found")
@@ -22,6 +25,16 @@ class ClassAccess:
     class_id: uuid.UUID
     join_code: str
     qr_token: str
+
+
+def list_owned_classes(db: Session, staff: StaffAccount) -> MyClassesResponse:
+    """FR-02-03: the caller's OWNED classes only (``StaffClassScope.owner``) — only a class owner
+    may invite a colleague to share it (GATE gate: ``application.invitations.services``), so this
+    is exactly the set ``InviteColleague.tsx``'s 'Shared class' picker needs — never a fixture."""
+    rows = org_db.get_classes_for_staff(
+        db, staff.id, staff.school_id, (StaffClassScope.owner,)
+    )
+    return MyClassesResponse(classes=[ClassOut(id=r.id, name=r.name) for r in rows])
 
 
 def issue_access(db: Session, class_id: uuid.UUID) -> ClassAccess:
