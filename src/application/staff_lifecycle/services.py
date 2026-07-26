@@ -103,7 +103,7 @@ def set_staff_status(
             target=str(staff_id), school_id=actor.school_id,
         )
         db.commit()
-    target = identity_db.get_staff_in_school(db, actor.school_id, staff_id)
+    target = identity_db.get_staff_in_school_for_update(db, actor.school_id, staff_id)
     if target is None:
         logger.info(
             "fr_02_04_rejected action=set_status actor_id=%s reason=not_found staff_id=%s",

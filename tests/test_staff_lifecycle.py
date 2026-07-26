@@ -10,11 +10,18 @@
               -> test_revoke_gives_specific_revoked_message
   PATCH /api/v1/staff/{id}/status: legal hop succeeds, illegal hop 409, cross-school/non-leadership
   403/404, unknown id 404.         -> test_status_endpoint_*
+  Concurrency: a `deactivate` racing an `activate`-from-the-pre-deactivate-state must serialize —
+  the loser sees the post-commit `deactivated` state and gets a real 409, never a silent reactivation.
+              -> test_concurrent_deactivate_and_activate_never_reactivates
 """
+import threading
 import uuid
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
 import src.application.invitations.services as invitations_mod
-from config.env_config import settings
+from config.env_config import settings as env_settings
 from src.application.auth import sessions
 from src.constants.enums import SessionKind, StaffClassScope, StaffRole, StaffStatus
 from src.domain.identity.models import StaffAccount
@@ -37,7 +44,7 @@ def _mint(db, staff: StaffAccount) -> str:
     own concern (tests/test_authz.py). Mirrors test_leadership.py's own `_mint` precedent: issue a
     full (non-MFA-pending) session directly for a leadership actor under test here."""
     sess = sessions.create_session(
-        db, staff.id, SessionKind.staff, settings.staff_session_ttl_minutes,
+        db, staff.id, SessionKind.staff, env_settings.staff_session_ttl_minutes,
         school_id=staff.school_id,
     )
     db.commit()
@@ -245,3 +252,86 @@ def test_status_endpoint_not_found(client, db, make_school, make_staff):
         f"/api/v1/staff/{uuid.uuid4()}/status", json={"status": "deactivated"}, headers=_auth(token)
     )
     assert r.status_code == 404
+
+
+def test_concurrent_deactivate_and_activate_never_reactivates(db, make_school, make_staff):
+    """Real concurrency, real separate DB sessions (matches test_alert_config.py's established
+    methodology for this bug class). Without `get_staff_in_school_for_update`'s row lock, the
+    `activate` worker could read the pre-deactivate status, then commit `active` AFTER the
+    deactivate has already committed — silently reactivating a deactivated account. The lock forces
+    the `activate` worker to block until the `deactivate` worker's transaction ends, then re-read
+    the CURRENT (post-commit) status — so it correctly sees `deactivated` and gets a real 409."""
+    import time
+
+    from src.application.staff_lifecycle import services as staff_lifecycle_svc
+    from src.domain.identity import services as identity_db
+
+    school = make_school(code="LIFE-10", name="Lifecycle LIFE-10")
+    target = StaffAccount(
+        school_id=school.id, email="race@lifecycle.edu", password_hash="x",
+        role=StaffRole.teacher, status=StaffStatus.accepted,
+    )
+    db.add(target)
+    db.commit()
+    db.refresh(target)
+
+    engine = create_engine(env_settings.database_url_test, pool_pre_ping=True)
+    Session = sessionmaker(bind=engine)
+    barrier = threading.Barrier(2)
+    results: dict[str, object] = {}
+
+    # Generous timeouts (barrier + join): this suite runs alongside other concurrent lanes on the
+    # same box, so a tight timeout here risks a spurious KeyError/failure from a merely-SLOW thread
+    # under contention, not an actual correctness violation — the assertions below are what prove
+    # correctness, not how fast the threads got there.
+    def _deactivate() -> None:
+        sess = Session()
+        try:
+            row = identity_db.get_staff_in_school_for_update(sess, school.id, target.id)
+            barrier.wait(timeout=30)  # hold the lock until the activate worker is blocked on it
+            time.sleep(0.3)
+            staff_lifecycle_svc.transition(sess, row, StaffStatus.deactivated)
+            sess.commit()
+            results["deactivate"] = "ok"
+        except BaseException as exc:  # noqa: BLE001 - captured, asserted on the main thread
+            sess.rollback()
+            results["deactivate"] = exc
+        finally:
+            sess.close()
+
+    def _activate() -> None:
+        sess = Session()
+        try:
+            barrier.wait(timeout=30)
+            # Blocks here until `_deactivate` commits and releases the row lock, then re-reads the
+            # NOW-current (post-commit) status.
+            row = identity_db.get_staff_in_school_for_update(sess, school.id, target.id)
+            staff_lifecycle_svc.transition(sess, row, StaffStatus.active)
+            sess.commit()
+            results["activate"] = "ok"
+        except BaseException as exc:  # noqa: BLE001
+            sess.rollback()
+            results["activate"] = exc
+        finally:
+            sess.close()
+
+    t1 = threading.Thread(target=_deactivate)
+    t2 = threading.Thread(target=_activate)
+    t1.start()
+    t2.start()
+    t1.join(timeout=120)
+    t2.join(timeout=120)
+
+    # A thread still alive means it genuinely hung (not just "slow") — that's its own real bug, but
+    # a distinct one from what this test targets; fail loudly instead of a misleading KeyError.
+    assert not t1.is_alive(), "deactivate worker did not finish — investigate separately, not a race result"
+    assert not t2.is_alive(), "activate worker did not finish — investigate separately, not a race result"
+
+    assert results["deactivate"] == "ok"
+    from fastapi import HTTPException
+
+    assert isinstance(results["activate"], HTTPException)
+    assert results["activate"].status_code == 409  # illegal: deactivated is terminal
+
+    db.refresh(target)
+    assert target.status == StaffStatus.deactivated  # never silently reactivated

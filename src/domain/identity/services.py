@@ -85,6 +85,22 @@ def get_staff_in_school(
     )
 
 
+def get_staff_in_school_for_update(
+    db: Session, school_id: uuid.UUID, staff_id: uuid.UUID
+) -> StaffAccount | None:
+    """FR-02-04: same scoping as ``get_staff_in_school``, row-locked for the duration of a status
+    transition. Two concurrent status writes on the same account (e.g. a retried PATCH racing a
+    genuine one) must not interleave read-then-write — the second must see the first's committed
+    status, not a stale pre-commit read (mirrors ``get_school_for_decision``'s FR-02-02 precedent).
+    Without this, a late-committing transition could silently undo an already-committed
+    ``deactivated`` — a real access-control regression, not just a lost update."""
+    return db.scalar(
+        select(StaffAccount)
+        .where(StaffAccount.id == staff_id, StaffAccount.school_id == school_id)
+        .with_for_update()
+    )
+
+
 def get_active_school_by_code(db: Session, code: str) -> School | None:
     return db.scalar(
         select(School).where(School.sign_in_code == code, School.status == SchoolStatus.active)

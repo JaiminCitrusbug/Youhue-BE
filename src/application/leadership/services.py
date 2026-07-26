@@ -94,7 +94,10 @@ def deactivate_staff(
         )
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unsupported status value")
 
-    target = identity_db.get_staff_in_school(db, school_id, staff_id)
+    # FR-02-04: row-locked for the duration of the transition — this endpoint and
+    # `PATCH /staff/{id}/status` both mutate the same account's status, so a concurrent write from
+    # either surface must not interleave read-then-write (see `get_staff_in_school_for_update`).
+    target = identity_db.get_staff_in_school_for_update(db, school_id, staff_id)
     if target is None:
         logger.info(
             "fr_16_02_rejected action=update_staff actor_id=%s reason=not_found staff_id=%s",
