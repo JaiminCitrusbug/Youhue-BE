@@ -21,7 +21,12 @@ source = ["src", "config", "main"]
 [tool.ruff]
 line-length = 100
 src = ["src", "tests", "config", "."]
-extend-exclude = ["alembic"]
+# `worktrees/` holds Batch-03's per-ticket git worktrees, each a full nested checkout with its own
+# `src`/`tests` — without this exclude, `ruff check .` (the exact command the gate invokes) walks
+# into whichever worktrees happen to exist alongside this one and picks up their transient/mid-edit
+# state, causing intermittent gate failures unrelated to the actual pushed diff (same class of bug
+# already fixed for mypy below; found live, blocking every lane's push, 2026-07-26).
+extend-exclude = ["alembic", "worktrees"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "S"]
