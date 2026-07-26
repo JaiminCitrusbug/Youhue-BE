@@ -9,12 +9,17 @@ from src.application.risk import services as risk_svc
 from src.constants.enums import SessionKind
 from src.domain.checkin import services as checkin_db
 from src.domain.identity import services as identity_db
+from src.domain.risk import services as risk_db
 from src.infrastructure.middlewares.auth_middleware import DbDep, SessionDep, require_same_school
 from src.schemas.risk import (
+    RouteRequest,
+    RouteResponse,
     ScoreRequest,
     ScoreResponse,
     SlowBurnEvaluateRequest,
     SlowBurnEvaluateResponse,
+    TriageQueueItem,
+    TriageQueueResponse,
 )
 
 logger = logging.getLogger("youhue.risk")
@@ -41,6 +46,64 @@ def score(body: ScoreRequest, sess: SessionDep, db: DbDep) -> ScoreResponse:
     return ScoreResponse(
         flagged=result.flagged, risk_score=result.risk_score, matched_terms=result.matched_terms
     )
+
+
+@router.post("/route", response_model=RouteResponse)
+def route(body: RouteRequest, sess: SessionDep, db: DbDep) -> RouteResponse:
+    """FR-12-06 (GATE G-9): route a scored check-in to exactly one band — immediate alert, triage
+    queue, or no action. Staff-only, school-scoped, same posture as /score. On completion this
+    surfaces the flag (persists the band, and for immediate hands off to already-configured
+    adults) and takes NO other action on the student."""
+    if sess.kind != SessionKind.staff:
+        logger.warning("fr_12_06_forbidden reason=non_staff kind=%s", sess.kind.value)
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Staff session required")
+    checkin = checkin_db.get_checkin(db, body.checkin_id)
+    if checkin is None:
+        logger.info("fr_12_06_rejected checkin=%s reason=not_found", body.checkin_id)
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Check-in not found")
+    try:
+        require_same_school(sess, checkin.school_id)
+    except HTTPException:
+        logger.warning("fr_12_06_forbidden checkin=%s", body.checkin_id)
+        raise
+    try:
+        band, flag_id = risk_svc.route_checkin(db, body.checkin_id)
+    except Exception as exc:
+        db.rollback()
+        logger.exception("fr_12_06_error checkin=%s", body.checkin_id)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not route check-in"
+        ) from exc
+    db.commit()
+    return RouteResponse(band=band.value, flag_id=flag_id)
+
+
+@router.get("/triage", response_model=TriageQueueResponse)
+def triage_queue(sess: SessionDep, db: DbDep) -> TriageQueueResponse:
+    """SC-038 — the caller's own school's open, triage-band flags for human review. Render-only
+    (GATE G-9): a read never performs an action on a student."""
+    if sess.kind != SessionKind.staff:
+        logger.warning("fr_12_06_forbidden reason=non_staff kind=%s", sess.kind.value)
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Staff session required")
+    staff = identity_db.get_staff(db, sess.subject_id)
+    if staff is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")
+    flags = risk_db.list_open_triage_flags(db, staff.school_id)
+    logger.info("fr_12_06_success action=triage_queue staff=%s count=%s", staff.id, len(flags))
+    items = []
+    for f in flags:
+        student = identity_db.get_student(db, f.student_id)
+        items.append(
+            TriageQueueItem(
+                flag_id=f.id,
+                student_id=f.student_id,
+                student_name=student.display_name if student else "Unknown",
+                type=f.type.value,
+                risk_score=float(f.risk_score),
+                created_at=f.created_at,
+            )
+        )
+    return TriageQueueResponse(flags=items)
 
 
 @router.post("/slow-burn/evaluate", response_model=SlowBurnEvaluateResponse)

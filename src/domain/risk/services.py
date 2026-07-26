@@ -5,8 +5,8 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from src.constants.enums import FlagBand, FlagStatus, FlagType
-from src.domain.risk.models import AlertRecipientConfig, ConcernWordList, Flag
+from src.constants.enums import FlagBand, FlagEventType, FlagStatus, FlagType
+from src.domain.risk.models import AlertRecipientConfig, ConcernWordList, Flag, FlagEvent
 
 
 def get_concern_word_list(db: Session, school_id: uuid.UUID) -> ConcernWordList | None:
@@ -185,6 +185,44 @@ def upsert_open_flag(
             f"open-flag upsert invariant violated for student_id={student_id} type={flag_type}"
         )
     return flag
+
+
+def get_flag(db: Session, flag_id: uuid.UUID) -> Flag | None:
+    return db.get(Flag, flag_id)
+
+
+def set_flag_band(db: Session, flag: Flag, band: FlagBand) -> Flag:
+    """FR-12-06: persist the routing decision. `flag.band` is null until routed (see `create_flag`
+    docstring); the routing service is the single owner of this write (render-only downstream, per
+    the ticket's own out-of-scope line) — no other caller ever sets `Flag.band`."""
+    flag.band = band
+    db.flush()
+    return flag
+
+
+def record_flag_alerted(db: Session, flag_id: uuid.UUID) -> FlagEvent:
+    """Immutable event marking that an immediate-band flag's configured adults were alerted
+    (FR-12-06 hands off to the notification enqueue path; INFRA-05/FR-18-03 own actual delivery)."""
+    event = FlagEvent(flag_id=flag_id, event_type=FlagEventType.alerted, actor_id=None)
+    db.add(event)
+    db.flush()
+    return event
+
+
+def list_open_triage_flags(db: Session, school_id: uuid.UUID) -> list[Flag]:
+    """SC-038 triage queue: open, triage-band flags for a school, oldest first (human review
+    order) — read-only, render-only surface (GATE G-9: no automated action follows from a read)."""
+    return list(
+        db.scalars(
+            select(Flag)
+            .where(
+                Flag.school_id == school_id,
+                Flag.band == FlagBand.triage,
+                Flag.status == FlagStatus.open,
+            )
+            .order_by(Flag.created_at)
+        )
+    )
 
 
 def create_flag(

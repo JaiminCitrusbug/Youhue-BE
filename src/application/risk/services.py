@@ -15,13 +15,14 @@ from sqlalchemy.orm import Session
 from config.env_config import settings
 from src.application.authz import services as authz
 from src.application.derived import services as derived
-from src.constants.enums import FlagType, StaffRole
+from src.application.notifications import services as notif_svc
+from src.constants.enums import FlagBand, FlagType, StaffRole
 from src.domain.checkin import services as checkin_db
 from src.domain.checkin.models import CheckIn
 from src.domain.identity import services as identity_db
 from src.domain.identity.models import StaffAccount
 from src.domain.risk import services as risk_db
-from src.domain.risk.models import AlertRecipientConfig
+from src.domain.risk.models import AlertRecipientConfig, Flag
 
 logger = logging.getLogger("youhue.risk")
 
@@ -204,6 +205,64 @@ def set_alert_config(
         actor.id, school_id, alert_type,
     )
     return row
+
+
+def decide_band(risk_score: float) -> FlagBand:
+    """FR-12-06: single owner of the band decision (render-only downstream). Cut-offs are
+    environment-configurable (`settings.risk_immediate_threshold` / `risk_triage_threshold`, D-05
+    pending BA/SA ratification — carried as a config-driven placeholder like every other
+    pending-ratification cut-off this project has shipped) and default to erring toward triage over
+    silence: the triage threshold is the lower, more inclusive bound, so an ambiguous score lands in
+    triage (human review) rather than falling through to no action."""
+    if risk_score >= settings.risk_immediate_threshold:
+        return FlagBand.immediate
+    if risk_score >= settings.risk_triage_threshold:
+        return FlagBand.triage
+    return FlagBand.none
+
+
+def _alert_configured_adults(db: Session, flag: Flag) -> int:
+    """Hand off to the configured adults for an immediate-band flag — ENQUEUES only (creates the
+    Notification + per-channel AlertDelivery rows via the existing INFRA-05/FR-18-03 path); it does
+    NOT itself send email or run the retry engine (that dispatch is owned by
+    `process_due_deliveries`, out of this ticket's scope per its own out-of-scope line). No
+    configured route (FR-12-05 not yet set for this school/alert_type, GATE G-5) means zero
+    recipients — a legitimate, non-error state, not a 500."""
+    config = risk_db.get_alert_recipient_config(db, flag.school_id, "immediate")
+    if config is None or not config.recipient_staff_ids:
+        return 0
+    for recipient_id in config.recipient_staff_ids:
+        notif_svc.enqueue(
+            db,
+            recipient_id=recipient_id,
+            ntype="risk_alert",
+            payload={"flag_id": str(flag.id), "band": "immediate", "reason": flag.type.value},
+            flag_id=flag.id,
+        )
+    risk_db.record_flag_alerted(db, flag.id)
+    return len(config.recipient_staff_ids)
+
+
+def route_checkin(db: Session, checkin_id: uuid.UUID) -> tuple[FlagBand, uuid.UUID | None]:
+    """FR-12-06: route a scored check-in to exactly one band. GATE G-9 — on completion this ONLY
+    persists `Flag.band` and (for immediate) enqueues a notification to already-configured adults;
+    it never writes to Student, never messages/locks/notifies the child, and takes no other action.
+
+    Idempotent (Baseline BR-05): a check-in with no Flag (score never cleared the flagging
+    threshold — see `score_checkin`) is already, implicitly, `none` — nothing to route, no Flag row
+    needed. A Flag whose band is already set returns the existing decision unchanged (a retry never
+    re-alerts)."""
+    flag = risk_db.get_flag_by_checkin(db, checkin_id)
+    if flag is None:
+        return FlagBand.none, None
+    if flag.band is not None:
+        return flag.band, flag.id
+    band = decide_band(float(flag.risk_score))
+    risk_db.set_flag_band(db, flag, band)
+    if band == FlagBand.immediate:
+        _alert_configured_adults(db, flag)
+    logger.info("fr_12_06_success checkin=%s flag=%s band=%s", checkin_id, flag.id, band.value)
+    return band, flag.id
 
 
 def process_pending(db: Session) -> int:

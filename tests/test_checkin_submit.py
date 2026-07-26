@@ -517,7 +517,9 @@ def test_submit_scores_checkin_and_creates_flag(client, db, make_school, make_st
     assert r.status_code == 201
     checkin_id = r.json()["checkin_id"]
     flag = db.query(Flag).filter(Flag.checkin_id == checkin_id).first()
-    assert flag is not None and float(flag.risk_score) == 0.90 and flag.band is None
+    # FR-12-06 chains routing onto the same submit call: a 0.90 concern-word score now also
+    # carries a band by the time the response returns (was `is None` before FR-12-06 existed).
+    assert flag is not None and float(flag.risk_score) == 0.90 and flag.band.value == "immediate"
 
 
 def test_submit_clean_reflection_does_not_flag(client, db, make_school, make_student):

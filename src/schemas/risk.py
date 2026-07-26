@@ -1,5 +1,6 @@
 """Risk-scoring request/response schemas (INFRA-06)."""
 import uuid
+from datetime import datetime
 
 from pydantic import BaseModel, Field
 
@@ -12,6 +13,30 @@ class ScoreResponse(BaseModel):
     flagged: bool
     risk_score: float
     matched_terms: list[str]
+
+
+class RouteRequest(BaseModel):
+    """FR-12-06 — POST /api/v1/risk/route body."""
+
+    checkin_id: uuid.UUID
+
+
+class RouteResponse(BaseModel):
+    band: str  # immediate | triage | none
+    flag_id: uuid.UUID | None = None
+
+
+class TriageQueueItem(BaseModel):
+    flag_id: uuid.UUID
+    student_id: uuid.UUID
+    student_name: str
+    type: str
+    risk_score: float
+    created_at: datetime
+
+
+class TriageQueueResponse(BaseModel):
+    flags: list[TriageQueueItem]
 
 
 class SlowBurnEvaluateRequest(BaseModel):

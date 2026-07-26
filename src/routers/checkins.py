@@ -113,13 +113,29 @@ def _score_after_create(db: Session, checkin: CheckIn) -> None:
     check-in response — the row stays `scored=False` and the existing `process_pending` worker
     (INFRA-06) retries/dead-letters it (surfaced CRITICAL, never silently dropped). Shared by both
     `submit_checkin` and `sync_checkin` (FR-04-06) — an offline-originated check-in is scored the
-    same way as an online one, on its first successful write."""
+    same way as an online one, on its first successful write.
+
+    FR-12-06 chains routing onto the SAME synchronous, best-effort, own-transaction call — same
+    precedent as this function's own scoring call: the ticket text calls routing "an
+    internal/background system process," and this codebase has no task-queue/celery infra
+    (confirmed absent), so "background" here means "not user-initiated," not "off-thread." A
+    routing failure never fails the check-in response either; the flag stays unrouted (`band=NULL`)
+    and a later explicit `POST /risk/route` call can still route it — routing is idempotent
+    (`route_checkin`), so a retry never double-alerts."""
     try:
-        risk_svc.score_checkin(db, checkin)
+        result = risk_svc.score_checkin(db, checkin)
         db.commit()
     except Exception:  # noqa: BLE001 — scoring must never fail the check-in response
         db.rollback()
         logger.exception("fr_12_01_error action=submit_checkin checkin_id=%s", checkin.id)
+        return
+    if result.flagged:
+        try:
+            risk_svc.route_checkin(db, checkin.id)
+            db.commit()
+        except Exception:  # noqa: BLE001 — routing must never fail the check-in response
+            db.rollback()
+            logger.exception("fr_12_06_error action=submit_checkin checkin_id=%s", checkin.id)
 
 
 def _offer_activity_after_create(
