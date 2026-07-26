@@ -8,6 +8,7 @@ import uuid
 from fastapi import APIRouter, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
+from src.application.billing import services as billing_svc
 from src.application.checkin import services as checkin_svc
 from src.application.risk import services as risk_svc
 from src.constants.enums import ActivityEngagementStatus
@@ -103,8 +104,27 @@ def submit_checkin(body: CheckInCreate, student: StudentDep, db: DbDep) -> Check
     activity_offer = None
     if created:
         _score_after_create(db, checkin)
+        _start_trial_after_create(db, checkin)
         activity_offer = _offer_activity_after_create(db, student, checkin)
     return CheckInOut(checkin_id=checkin.id, activity_offer=activity_offer)
+
+
+def _start_trial_after_create(db: Session, checkin: CheckIn) -> None:
+    """FR-17-03: the school's whole-school Premium trial arms from its first student check-in —
+    a system action, not a user-initiated purchase (ticket §Interaction contract). Runs in its own
+    transaction AFTER the check-in's own commit durably lands (matches `_score_after_create`'s
+    established precedent immediately above: this session's real "synchronous, not an async queue"
+    pattern for a system action fired off a check-in write) — a failure here never fails the
+    check-in response, and is surfaced at ERROR level rather than silently dropped (ticket: "a 500
+    error is surfaced, never silently dropped")."""
+    try:
+        billing_svc.start_trial_on_first_checkin(db, checkin.school_id)
+        db.commit()
+    except Exception:  # noqa: BLE001 - must never fail the check-in response
+        db.rollback()
+        logger.exception(
+            "fr_17_03_error action=start_trial_after_checkin checkin_id=%s", checkin.id
+        )
 
 
 def _score_after_create(db: Session, checkin: CheckIn) -> None:
@@ -207,6 +227,7 @@ def sync_checkin(
     activity_offer = None
     if created:
         _score_after_create(db, checkin)
+        _start_trial_after_create(db, checkin)
         activity_offer = _offer_activity_after_create(db, student, checkin)
         response.status_code = status.HTTP_201_CREATED
     else:

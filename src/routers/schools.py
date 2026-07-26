@@ -18,6 +18,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
+from src.application.billing import services as billing_svc
 from src.application.roster import services as roster_svc
 from src.application.schools import services as schools_svc
 from src.infrastructure.middlewares.auth_middleware import DbDep, StaffDep
@@ -39,6 +40,7 @@ from src.schemas.schools import (
     SchoolDecisionRequest,
     SchoolDecisionResponse,
     SchoolDetailResponse,
+    TrialStartResponse,
 )
 
 logger = logging.getLogger("youhue.schools")
@@ -147,6 +149,44 @@ def decide_school(
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Decision failed") from exc
     db.commit()
     return result
+
+
+# --- FR-17-03: whole-school Premium trial clock (starts on the first student check-in) ----------
+
+
+@router.post(
+    "/{school_id}/trial/start",
+    response_model=TrialStartResponse,
+    responses={
+        status.HTTP_403_FORBIDDEN: {
+            "model": ErrorResponse,
+            "description": "Caller belongs to a different school.",
+        },
+        status.HTTP_409_CONFLICT: {
+            "model": ErrorResponse,
+            "description": "The trial has already started for this school.",
+        },
+        status.HTTP_500_INTERNAL_SERVER_ERROR: {
+            "model": ErrorResponse,
+            "description": "Could not start the trial; nothing was written.",
+        },
+    },
+)
+def start_trial(school_id: uuid.UUID, staff: StaffDep, db: DbDep) -> TrialStartResponse:
+    """FR-17-03 — the same idempotent action the check-in submit path fires automatically off the
+    school's first student check-in; this is the deliberate manual trigger the ticket's own DoD
+    names (`POST .../trial/start`), same-school-only, 409 on an already-started trial."""
+    try:
+        trial_start_at, trial_end_at = billing_svc.start_trial_via_endpoint(db, staff, school_id)
+    except HTTPException:
+        db.rollback()  # no partial write survives a forbidden/already-started call
+        raise
+    except Exception as exc:  # noqa: BLE001 — last-resort guard: never leak a partial write
+        db.rollback()
+        logger.exception("fr_17_03_error action=start_trial")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not start trial") from exc
+    db.commit()
+    return TrialStartResponse(trial_start_at=trial_start_at, trial_end_at=trial_end_at)
 
 
 # --- FR-03-01: staff import a class roster via CSV ----------------------------------------------

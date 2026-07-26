@@ -123,3 +123,10 @@ class DecisionConflictResponse(BaseModel):
     re-arms a trial or re-flips a rejection; it is a terminal conflict."""
 
     detail: DecisionConflictDetail
+
+
+class TrialStartResponse(BaseModel):
+    """FR-17-03 — 200 body for `POST /schools/{id}/trial/start`."""
+
+    trial_start_at: datetime
+    trial_end_at: datetime
