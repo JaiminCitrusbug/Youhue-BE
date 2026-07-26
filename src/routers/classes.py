@@ -14,7 +14,7 @@ from src.application.classes import services as classes_svc
 from src.application.dashboard import services as dashboard_svc
 from src.infrastructure.middlewares.auth_middleware import DbDep, StaffDep
 from src.schemas.classes import MyClassesResponse
-from src.schemas.dashboard import ClassDashboardOut
+from src.schemas.dashboard import ClassDashboardOut, ClassRosterOut
 
 router = APIRouter(prefix="/classes", tags=["classes"])
 
@@ -33,3 +33,14 @@ def get_my_classes(staff: StaffDep, db: DbDep) -> MyClassesResponse:
 def get_class_dashboard(class_id: uuid.UUID, staff: StaffDep, db: DbDep) -> ClassDashboardOut:
     """FR-10-01 — read-only, no transaction to commit/roll back."""
     return dashboard_svc.get_class_dashboard(db, staff, class_id)
+
+
+@router.get(
+    "/{class_id}/roster",
+    response_model=ClassRosterOut,
+    responses={403: {"description": "Not this staff member's own/shared class."}},
+)
+def get_class_roster(class_id: uuid.UUID, staff: StaffDep, db: DbDep) -> ClassRosterOut:
+    """FR-10-02 — the class's real student rows, for the dashboard's "click into a single
+    student" (Scenario 1). Read-only, no transaction to commit/roll back."""
+    return dashboard_svc.get_class_roster(db, staff, class_id)

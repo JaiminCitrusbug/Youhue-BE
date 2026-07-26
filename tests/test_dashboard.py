@@ -228,3 +228,37 @@ def test_dashboard_readable_by_shared_scope_teacher_not_only_owner(
 
     r = client.get(DASH.format(id=klass.id), headers=_auth(token))
     assert r.status_code == 200
+
+
+ROSTER = "/api/v1/classes/{id}/roster"
+
+
+def test_roster_lists_real_student_rows(
+    client, db, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class,
+):
+    """FR-10-02: the dashboard's "click into a single student" (Scenario 1) needs real rows to
+    link against — this endpoint returns the class's actual roster, name-ordered."""
+    school = make_school(code="D-8", status=SchoolStatus.active, name="Dash D-8")
+    teacher = make_staff(school, email="t-d8@school.edu", role=StaffRole.teacher)
+    klass = make_class(school, name="3A")
+    grant_class_access(teacher, klass, scope=StaffClassScope.owner)
+    ben = make_student(school, name="Ben")
+    amy = make_student(school, name="Amy")
+    add_to_class(klass, ben)
+    add_to_class(klass, amy)
+    token = _mint(db, teacher)
+
+    r = client.get(ROSTER.format(id=klass.id), headers=_auth(token))
+    assert r.status_code == 200
+    names = [s["display_name"] for s in r.json()["students"]]
+    assert names == ["Amy", "Ben"]  # name-ordered, not insertion-ordered
+
+
+def test_roster_403_for_class_outside_own_or_shared_scope(client, db, make_school, make_staff, make_class):
+    school = make_school(code="D-9", status=SchoolStatus.active, name="Dash D-9")
+    teacher = make_staff(school, email="t-d9@school.edu", role=StaffRole.teacher)
+    other_class = make_class(school, name="NotMine")
+    token = _mint(db, teacher)
+
+    r = client.get(ROSTER.format(id=other_class.id), headers=_auth(token))
+    assert r.status_code == 403

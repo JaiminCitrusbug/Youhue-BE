@@ -27,7 +27,7 @@ from src.domain.checkin import services as checkin_db
 from src.domain.identity.models import StaffAccount
 from src.domain.org import services as org_db
 from src.domain.org.models import ClassGroup
-from src.schemas.dashboard import ClassDashboardOut
+from src.schemas.dashboard import ClassDashboardOut, ClassRosterOut, ClassRosterRow
 
 logger = logging.getLogger("youhue.dashboard")
 
@@ -97,4 +97,15 @@ def get_class_dashboard(db: Session, staff: StaffAccount, class_id: uuid.UUID) -
         live=True,  # the dashboard always computes on-demand, never from a stale cache
         period=_DEFAULT_PERIOD_KEY,
         timezone=config.timezone if config is not None else "UTC",
+    )
+
+
+def get_class_roster(db: Session, staff: StaffAccount, class_id: uuid.UUID) -> ClassRosterOut:
+    """FR-10-02: the class's real student rows, same own/shared-class scoping as the dashboard
+    itself (`require_class_access` — existence hidden, same 403 for "not yours" and "no such
+    class")."""
+    authz.require_class_access(db, staff, class_id)
+    rows = org_db.list_students_in_class(db, class_id)
+    return ClassRosterOut(
+        students=[ClassRosterRow(id=s.id, display_name=s.display_name) for s in rows]
     )

@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.constants.enums import InvitationStatus, SchoolStatus, StaffClassScope
-from src.domain.identity.models import School
+from src.domain.identity.models import School, Student
 from src.domain.org.models import (
     CalendarConfig,
     ClassGroup,
@@ -55,6 +55,21 @@ def get_student_ids_in_class(db: Session, class_id: uuid.UUID) -> list[uuid.UUID
     return list(
         db.scalars(
             select(ClassMembership.student_id).where(ClassMembership.class_id == class_id)
+        )
+    )
+
+
+def list_students_in_class(db: Session, class_id: uuid.UUID) -> list[Student]:
+    """FR-10-02: the class roster's real student ROWS (name, not just id) — the dashboard needs
+    something real to link "click into a single student" against (ticket Scenario 1); no prior
+    ticket exposed a class-scoped student list (FR-03-05's roster is school-wide, for CSV import
+    reconciliation, not class-scoped). Name order for a stable, scannable list."""
+    return list(
+        db.scalars(
+            select(Student)
+            .join(ClassMembership, ClassMembership.student_id == Student.id)
+            .where(ClassMembership.class_id == class_id)
+            .order_by(Student.display_name.asc())
         )
     )
 

@@ -14,7 +14,7 @@ from src.application.students import services as students_svc
 from src.infrastructure.middlewares.auth_middleware import DbDep, StaffDep, StudentDep
 from src.schemas.checkin import HistoryOut, MoodPointOut, ReflectionPointOut
 from src.schemas.compliance import ConsentIn, ConsentOut
-from src.schemas.students import StudentOut
+from src.schemas.students import StudentDetailOut, StudentOut
 
 logger = logging.getLogger("youhue.checkin")
 router = APIRouter(prefix="/students", tags=["students"])
@@ -56,6 +56,23 @@ def get_student(student_id: uuid.UUID, staff: StaffDep, db: DbDep) -> StudentOut
     return StudentOut(
         id=s.id, display_name=s.display_name, age_band=s.age_band.value, school_id=s.school_id
     )
+
+
+@router.get(
+    "/{student_id}/detail",
+    response_model=StudentDetailOut,
+    responses={
+        status.HTTP_403_FORBIDDEN: {
+            "description": "Student is not in the caller's own/shared class scope.",
+        },
+        status.HTTP_404_NOT_FOUND: {"description": "No such student."},
+    },
+)
+def get_student_detail(student_id: uuid.UUID, staff: StaffDep, db: DbDep) -> StudentDetailOut:
+    """FR-10-02 (SC-028) — a teacher's drill-in from the class dashboard into a single student:
+    mood history, reflections and participation (rendered from the single owner, never
+    recomputed)."""
+    return students_svc.get_student_detail(db, staff, student_id)
 
 
 @router.post("/{student_id}/consent", response_model=ConsentOut)
