@@ -26,6 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from src.application.auth import admin as admin_svc
 from src.application.authz import admin as admin_authz
 from src.application.concern_words import services as concern_words_svc
+from src.application.platform_stats import services as platform_stats_svc
 from src.application.school_admin import services as school_admin_svc
 from src.application.seed import services as seed_svc
 from src.constants.enums import SessionKind
@@ -39,6 +40,7 @@ from src.schemas.admin import (
     AdminSignInResponse,
     DefaultWordListResponse,
     DefaultWordListUpdate,
+    PlatformStatsResponse,
     SchoolActionRequest,
     SchoolActionResponse,
     SchoolDetail,
@@ -132,6 +134,31 @@ def _school_detail(school: School, sub: Subscription | None) -> SchoolDetail:
         subscription_state=sub.state if sub else None,
         trial_end_at=sub.trial_end_at if sub else None,
         trial_extension_count=sub.trial_extension_count if sub else 0,
+    )
+
+
+@router.get("/stats", response_model=PlatformStatsResponse)
+def get_platform_stats(admin: AdminDep, db: DbDep) -> PlatformStatsResponse:
+    """SC-074 — platform-wide statistics: schools, active trials, check-in volume, alert volume.
+    `view_statistics`-gated (403 audit-logged otherwise); read-only aggregates over base tables,
+    rendered not recomputed. An empty platform returns all-zero counts (the empty state), never an
+    error."""
+    try:
+        stats = platform_stats_svc.get_platform_stats(db, admin)
+    except HTTPException:
+        db.commit()  # persist the audit-logged RBAC denial before surfacing the error
+        raise
+    except Exception as exc:  # noqa: BLE001 - last-resort guard, never leak an unhandled 500
+        db.rollback()
+        logger.exception("fr_19_07_error admin=%s action=get_platform_stats", admin.id)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not load platform statistics"
+        ) from exc
+    return PlatformStatsResponse(
+        schools=stats.schools,
+        active_trials=stats.active_trials,
+        checkin_volume=stats.checkin_volume,
+        alert_volume=stats.alert_volume,
     )
 
 

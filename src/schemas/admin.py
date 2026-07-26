@@ -161,3 +161,15 @@ class SeedActivityListResponse(BaseModel):
     @classmethod
     def of(cls, activities: list[Activity]) -> "SeedActivityListResponse":
         return cls(activities=[SeedActivityOut.model_validate(a) for a in activities])
+
+# ---- FR-19-07 — platform statistics (SC-074) ----------------------------------------------------
+
+
+class PlatformStatsResponse(BaseModel):
+    """GET /admin/stats — plain aggregate counts, platform-wide. Zero is a valid, renderable value
+    (the empty state) for every field, never an error condition."""
+
+    schools: int
+    active_trials: int
+    checkin_volume: int
+    alert_volume: int
