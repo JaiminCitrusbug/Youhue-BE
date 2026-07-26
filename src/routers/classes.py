@@ -8,7 +8,7 @@ FR-10-01 adds the class dashboard read.
 """
 import uuid
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from src.application.classes import services as classes_svc
 from src.application.dashboard import services as dashboard_svc
@@ -28,11 +28,20 @@ def get_my_classes(staff: StaffDep, db: DbDep) -> MyClassesResponse:
 @router.get(
     "/{class_id}/dashboard",
     response_model=ClassDashboardOut,
-    responses={403: {"description": "Not this staff member's own/shared class."}},
+    responses={
+        403: {"description": "Not this staff member's own/shared class."},
+        422: {"description": "Unknown range value."},
+    },
 )
-def get_class_dashboard(class_id: uuid.UUID, staff: StaffDep, db: DbDep) -> ClassDashboardOut:
-    """FR-10-01 — read-only, no transaction to commit/roll back."""
-    return dashboard_svc.get_class_dashboard(db, staff, class_id)
+def get_class_dashboard(
+    class_id: uuid.UUID,
+    staff: StaffDep,
+    db: DbDep,
+    range: str | None = Query(default=None, description="this_week|month|term|around:{date}"),
+) -> ClassDashboardOut:
+    """FR-10-01/FR-10-03 — read-only, no transaction to commit/roll back. `range` omitted defaults
+    to `this_week` (unchanged FR-10-01 behaviour)."""
+    return dashboard_svc.get_class_dashboard(db, staff, class_id, range)
 
 
 @router.get(

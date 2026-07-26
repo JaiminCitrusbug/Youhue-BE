@@ -14,9 +14,10 @@ hard-coded as if it were a ratified product decision.
 import logging
 import statistics
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import cast
 
+from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from config.env_config import settings
@@ -31,8 +32,33 @@ from src.schemas.dashboard import ClassDashboardOut, ClassRosterOut, ClassRoster
 
 logger = logging.getLogger("youhue.dashboard")
 
-_DEFAULT_PERIOD_KEY = "this_week"  # FR-10-03 (time-range filter) is a later ticket; this ticket
-# ships the one period the approved screen defaults to ("This week...").
+_DEFAULT_PERIOD_KEY = "this_week"  # the one period the approved screen defaults to before any
+# filter is applied ("This week..."), and what an omitted `range` query param still resolves to.
+
+# FR-10-03: the ticket's own query-string vocabulary (`this_week|month|term|around:{date}`) is
+# NOT identical to FR-07-04's internal `PERIOD_KEYS` (`this_week|this_month|this_term`) — this
+# maps the former to the latter rather than renaming FR-07-04's own established names.
+_RANGE_TO_PERIOD_KEY = {"this_week": "this_week", "month": "this_month", "term": "this_term"}
+
+
+def _parse_range(range_param: str | None) -> tuple[str, date | None]:
+    """Returns (period_key, around_date) for `calendar_svc.resolve_period`. 422 on anything not in
+    the ticket's own vocabulary — server-side validation is the gate, never the client's job to
+    get right (ticket §Must-nots)."""
+    if range_param is None:
+        return _DEFAULT_PERIOD_KEY, None
+    if range_param in _RANGE_TO_PERIOD_KEY:
+        return _RANGE_TO_PERIOD_KEY[range_param], None
+    if range_param.startswith("around:"):
+        raw_date = range_param[len("around:"):]
+        try:
+            return "around", date.fromisoformat(raw_date)
+        except ValueError:
+            pass  # falls through to the 422 below — an unparseable date is still a bad `range`
+    raise HTTPException(
+        status.HTTP_422_UNPROCESSABLE_ENTITY,
+        "range must be one of this_week|month|term, or around:{YYYY-MM-DD}",
+    )
 
 
 @derived.owns("class.mood_index")
@@ -59,7 +85,9 @@ def compute_trend(current_index: float | None, prior_index: float | None) -> str
     return "up" if delta > 0 else "down"
 
 
-def get_class_dashboard(db: Session, staff: StaffAccount, class_id: uuid.UUID) -> ClassDashboardOut:
+def get_class_dashboard(
+    db: Session, staff: StaffAccount, class_id: uuid.UUID, range_param: str | None = None
+) -> ClassDashboardOut:
     # `require_class_access` 403s for BOTH "not this staff member's own/shared class" AND "no such
     # class" (a nonexistent id resolves to no accessible class either way) — deliberately never
     # distinguishes the two responses, so a caller cannot probe for another school's class ids.
@@ -67,8 +95,11 @@ def get_class_dashboard(db: Session, staff: StaffAccount, class_id: uuid.UUID) -
     # `require_class_access` above already guarantees a real, accessible class row exists.
     klass = cast(ClassGroup, org_db.get_class(db, class_id))
 
+    period_key, around = _parse_range(range_param)
     config = org_db.get_calendar_config(db, staff.school_id)
-    start, end = calendar_svc.resolve_period(db, staff, _DEFAULT_PERIOD_KEY)
+    # FR-10-03: changing the filter RE-FETCHES against FR-07-04's real resolution — it never
+    # re-derives the previously-shown figures from the already-fetched window (ticket §Must-nots).
+    start, end = calendar_svc.resolve_period(db, staff, period_key, around=around)
     period_length = end - start
     prior_start, prior_end = start - period_length, start
 
@@ -85,8 +116,8 @@ def get_class_dashboard(db: Session, staff: StaffAccount, class_id: uuid.UUID) -
     trend = derived.compute("class.trend", current_index, prior_index)
 
     logger.info(
-        "fr_10_01_success action=get_dashboard actor_id=%s class_id=%s mood_index=%s trend=%s",
-        staff.id, class_id, current_index, trend,
+        "fr_10_01_success action=get_dashboard actor_id=%s class_id=%s mood_index=%s trend=%s "
+        "period=%s", staff.id, class_id, current_index, trend, period_key,
     )
     return ClassDashboardOut(
         class_id=str(class_id),
@@ -95,7 +126,7 @@ def get_class_dashboard(db: Session, staff: StaffAccount, class_id: uuid.UUID) -
         trend=trend,
         as_of=datetime.now(UTC),
         live=True,  # the dashboard always computes on-demand, never from a stale cache
-        period=_DEFAULT_PERIOD_KEY,
+        period=period_key,
         timezone=config.timezone if config is not None else "UTC",
     )
 

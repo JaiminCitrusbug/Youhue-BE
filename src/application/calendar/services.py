@@ -53,18 +53,29 @@ def _month_bounds(today: date) -> tuple[date, date]:
 
 
 def resolve_period(
-    db: Session, staff: StaffAccount, period_key: str
+    db: Session, staff: StaffAccount, period_key: str, *, around: date | None = None
 ) -> tuple[datetime, datetime]:
+    """``period_key='around'`` (FR-10-03) resolves the WEEK containing ``around`` — the same
+    Monday-Sunday window ``this_week`` uses, just anchored at a given date instead of today
+    (``_week_bounds`` already takes an arbitrary date, not literally "today"). Still resolved
+    against the school's real timezone below, same as every other period."""
     school_id = staff.school_id  # staff-scoped to the CALLER's own school only — never a param
 
-    if period_key not in PERIOD_KEYS:
+    if period_key == "around":
+        if around is None:
+            logger.warning(
+                "fr_07_04_rejected action=resolve actor_id=%s reason=missing_around_date",
+                staff.id,
+            )
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "around requires a date")
+    elif period_key not in PERIOD_KEYS:
         logger.warning(
             "fr_07_04_rejected action=resolve actor_id=%s reason=unknown_period_key "
             "period_key=%s", staff.id, period_key,
         )
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
-            f"Unknown period_key — must be one of {', '.join(PERIOD_KEYS)}",
+            f"Unknown period_key — must be one of {', '.join(PERIOD_KEYS)}, or 'around'",
         )
 
     config = org_db.get_calendar_config(db, school_id)
@@ -97,7 +108,9 @@ def resolve_period(
 
     today = datetime.now(tz).date()
 
-    if period_key == "this_week":
+    if period_key == "around" and around is not None:
+        start_date, end_date = _week_bounds(around)
+    elif period_key == "this_week":
         start_date, end_date = _week_bounds(today)
     elif period_key == "this_month":
         start_date, end_date = _month_bounds(today)

@@ -16,7 +16,7 @@ Every ticket Must-not has a test that fails if the guarantee is removed:
   MN-5  A shared-scope teacher (not just the owner) can read the dashboard.
         -> test_dashboard_readable_by_shared_scope_teacher_not_only_owner
 """
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
@@ -43,9 +43,13 @@ def _mint(db, staff: StaffAccount) -> str:
     return sessions.issue_token(sess)
 
 
-def _set_config(db, school, *, timezone: str = "UTC") -> CalendarConfig:
+def _set_config(
+    db, school, *, timezone: str = "UTC",
+    term_start: date | None = None, term_end: date | None = None,
+) -> CalendarConfig:
     row = CalendarConfig(
         school_id=school.id, window_start="08:00", window_end="09:00", timezone=timezone,
+        term_start=term_start, term_end=term_end,
     )
     db.add(row)
     db.commit()
@@ -262,3 +266,152 @@ def test_roster_403_for_class_outside_own_or_shared_scope(client, db, make_schoo
 
     r = client.get(ROSTER.format(id=other_class.id), headers=_auth(token))
     assert r.status_code == 403
+
+
+# =================================================================================================
+# FR-10-03 — time-range filter (range=this_week|month|term|around:{date})
+# =================================================================================================
+
+
+def test_range_omitted_defaults_to_this_week_unchanged(
+    client, db, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class,
+):
+    """Backward compatibility: FR-10-01's existing behaviour (no `range` param) is unchanged."""
+    school, teacher, klass, token = _setup_class_with_checkins(
+        db, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class,
+        code="R-1",
+    )
+    r = client.get(DASH.format(id=klass.id), headers=_auth(token))
+    assert r.status_code == 200
+    assert r.json()["period"] == "this_week"
+
+
+def test_range_month_resolves_against_the_school_calendar(
+    client, db, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class,
+):
+    """Scenario 1: selecting 'month' updates the figures to cover that period, resolved via
+    FR-07-04 (this test's fixed 'now' is 2026-07-22, so the month is July)."""
+    school = make_school(code="R-2", status=SchoolStatus.active, name="Dash R-2")
+    _set_config(db, school)
+    teacher = make_staff(school, email="t-r2@school.edu", role=StaffRole.teacher)
+    klass = make_class(school, name="3A")
+    grant_class_access(teacher, klass, scope=StaffClassScope.owner)
+    student = make_student(school, name="Amy")
+    add_to_class(klass, student)
+    _checkin(db, student, school, mood=4, at=datetime(2026, 7, 3, 9, 0))  # inside July, outside this_week
+    token = _mint(db, teacher)
+
+    r = client.get(DASH.format(id=klass.id) + "?range=month", headers=_auth(token))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["period"] == "this_month"
+    assert body["mood_index"] == round(4 * settings.dashboard_mood_index_scale, 2)
+
+
+def test_range_term_resolves_against_configured_term_dates(
+    client, db, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class,
+):
+    school = make_school(code="R-3", status=SchoolStatus.active, name="Dash R-3")
+    _set_config(db, school, term_start=date(2026, 6, 1), term_end=date(2026, 8, 31))
+    teacher = make_staff(school, email="t-r3@school.edu", role=StaffRole.teacher)
+    klass = make_class(school, name="3A")
+    grant_class_access(teacher, klass, scope=StaffClassScope.owner)
+    student = make_student(school, name="Amy")
+    add_to_class(klass, student)
+    _checkin(db, student, school, mood=2, at=datetime(2026, 6, 15, 9, 0))  # in-term, outside this_week/month
+    token = _mint(db, teacher)
+
+    r = client.get(DASH.format(id=klass.id) + "?range=term", headers=_auth(token))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["period"] == "this_term"
+    assert body["mood_index"] == round(2 * settings.dashboard_mood_index_scale, 2)
+
+
+def test_range_term_without_configured_term_dates_is_404(
+    client, db, make_school, make_staff, make_class, grant_class_access,
+):
+    school = make_school(code="R-4", status=SchoolStatus.active, name="Dash R-4")
+    _set_config(db, school)  # no term_start/term_end
+    teacher = make_staff(school, email="t-r4@school.edu", role=StaffRole.teacher)
+    klass = make_class(school, name="3A")
+    grant_class_access(teacher, klass, scope=StaffClassScope.owner)
+    token = _mint(db, teacher)
+
+    r = client.get(DASH.format(id=klass.id) + "?range=term", headers=_auth(token))
+    assert r.status_code == 404
+
+
+def test_range_around_a_specific_date_filters_to_the_week_containing_it(
+    client, db, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class,
+):
+    """Scenario 2: 'around' a date the teacher picks updates the figures to the range around
+    that date — resolved to the week containing it, independent of the fixed 'now' (2026-07-22)."""
+    school = make_school(code="R-5", status=SchoolStatus.active, name="Dash R-5")
+    _set_config(db, school)
+    teacher = make_staff(school, email="t-r5@school.edu", role=StaffRole.teacher)
+    klass = make_class(school, name="3A")
+    grant_class_access(teacher, klass, scope=StaffClassScope.owner)
+    student = make_student(school, name="Amy")
+    add_to_class(klass, student)
+    # 2026-06-10 (a Wednesday) — its containing week is Mon 2026-06-08 .. Mon 2026-06-15 (excl).
+    _checkin(db, student, school, mood=5, at=datetime(2026, 6, 10, 9, 0))
+    _checkin(db, student, school, mood=1, at=datetime(2026, 7, 21, 9, 0))  # this_week — must be excluded
+    token = _mint(db, teacher)
+
+    r = client.get(DASH.format(id=klass.id) + "?range=around:2026-06-10", headers=_auth(token))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["period"] == "around"
+    assert body["mood_index"] == round(5 * settings.dashboard_mood_index_scale, 2)
+
+
+def test_range_invalid_value_is_422(client, db, make_school, make_staff, make_class, grant_class_access):
+    school = make_school(code="R-6", status=SchoolStatus.active, name="Dash R-6")
+    _set_config(db, school)
+    teacher = make_staff(school, email="t-r6@school.edu", role=StaffRole.teacher)
+    klass = make_class(school, name="3A")
+    grant_class_access(teacher, klass, scope=StaffClassScope.owner)
+    token = _mint(db, teacher)
+
+    r = client.get(DASH.format(id=klass.id) + "?range=nonsense", headers=_auth(token))
+    assert r.status_code == 422
+
+
+def test_range_around_with_unparseable_date_is_422(
+    client, db, make_school, make_staff, make_class, grant_class_access,
+):
+    school = make_school(code="R-7", status=SchoolStatus.active, name="Dash R-7")
+    _set_config(db, school)
+    teacher = make_staff(school, email="t-r7@school.edu", role=StaffRole.teacher)
+    klass = make_class(school, name="3A")
+    grant_class_access(teacher, klass, scope=StaffClassScope.owner)
+    token = _mint(db, teacher)
+
+    r = client.get(DASH.format(id=klass.id) + "?range=around:not-a-date", headers=_auth(token))
+    assert r.status_code == 422
+
+
+def test_changing_the_filter_refetches_never_recomputes_client_side(
+    client, db, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class,
+):
+    """Ticket §Must-nots: 'changing the filter re-fetches, it does not re-derive existing figures'
+    — asserted at the contract level: two different `range` values against real, DIFFERENT
+    underlying data return DIFFERENT server-computed figures, proving each call is a fresh
+    resolution+aggregate, not a client-side transform of one cached response."""
+    school = make_school(code="R-8", status=SchoolStatus.active, name="Dash R-8")
+    _set_config(db, school)
+    teacher = make_staff(school, email="t-r8@school.edu", role=StaffRole.teacher)
+    klass = make_class(school, name="3A")
+    grant_class_access(teacher, klass, scope=StaffClassScope.owner)
+    student = make_student(school, name="Amy")
+    add_to_class(klass, student)
+    _checkin(db, student, school, mood=5, at=datetime(2026, 7, 21, 9, 0))  # inside this_week AND July
+    _checkin(db, student, school, mood=1, at=datetime(2026, 7, 3, 9, 0))  # inside July only
+    token = _mint(db, teacher)
+
+    week = client.get(DASH.format(id=klass.id), headers=_auth(token)).json()
+    month = client.get(DASH.format(id=klass.id) + "?range=month", headers=_auth(token)).json()
+    assert week["mood_index"] == round(5 * settings.dashboard_mood_index_scale, 2)
+    assert month["mood_index"] == round(((5 + 1) / 2) * settings.dashboard_mood_index_scale, 2)
+    assert week["mood_index"] != month["mood_index"]
