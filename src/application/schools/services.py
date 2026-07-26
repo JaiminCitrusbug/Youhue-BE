@@ -58,6 +58,7 @@ from sqlalchemy.orm import Session
 
 from src.application.authz import services as authz
 from src.application.isolation import services as isolation
+from src.application.staff_lifecycle import services as staff_lifecycle
 from src.constants.enums import SchoolStatus, StaffRole, StaffStatus
 from src.domain.billing import services as billing_db
 from src.domain.identity import services as identity_db
@@ -308,7 +309,13 @@ def decide_school(
     if decision == "approve":
         school.status = SchoolStatus.active
         result_status = "active"
-        identity_db.activate_invited_staff_in_school(db, school.id)
+        # FR-02-04: walk each still-invited account through the real lifecycle graph (invited ->
+        # sent -> accepted -> active) rather than jumping straight to active — the same
+        # `staff_lifecycle.advance_to` mechanism `invitations.services.accept_invitation` uses, so
+        # every onboarding path (self-registration+approval, colleague invite) shares ONE state
+        # machine, not two independent ad-hoc mutations.
+        for invited in identity_db.list_invited_staff_in_school(db, school.id):
+            staff_lifecycle.advance_to(db, invited, StaffStatus.active)
         billing_db.arm_trial_subscription(db, school.id)
         isolation.audit(
             db, actor_id=actor.id, action="school.approved", target=str(school.id),

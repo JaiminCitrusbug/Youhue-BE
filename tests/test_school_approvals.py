@@ -125,6 +125,43 @@ def test_approve_activates_the_registrant_together_with_the_school(
     assert staff.status == StaffStatus.active
 
 
+def test_approve_walks_the_registrant_through_the_real_lifecycle_not_a_direct_jump(
+    client, db, make_school, make_staff, monkeypatch
+):
+    """FR-02-04 review fix (Major): district approval used to set `staff.status = active` directly,
+    bypassing the shared state machine entirely — a real gap in FR-02-04's own core claim ("one
+    state machine, accurate lifecycle everywhere"). Now it must route through
+    `staff_lifecycle.advance_to`, the SAME mechanism `invitations.services.accept_invitation` uses,
+    so a tightened `_LEGAL_TRANSITIONS` graph would still be honoured on this onboarding path too."""
+    import src.application.schools.services as schools_svc
+    from src.application.staff_lifecycle import services as staff_lifecycle
+
+    calls: list[tuple[object, object]] = []
+    real_advance_to = staff_lifecycle.advance_to
+
+    def _spy(db_, staff_, target):
+        calls.append((staff_.id, target))
+        return real_advance_to(db_, staff_, target)
+
+    monkeypatch.setattr(schools_svc.staff_lifecycle, "advance_to", _spy)
+
+    reg = client.post(REGISTER, json={
+        "school_name": "Ashford Prep", "registrant_email": "head@ashford.edu",
+        "password": "Password123",
+    })
+    school_id = reg.json()["school_id"]
+    staff = db.query(StaffAccount).filter(StaffAccount.school_id == school_id).one()
+    assert staff.status == StaffStatus.invited
+
+    token = _district_token(db, make_school, make_staff)
+    r = client.post(_decision_url(school_id), json={"decision": "approve"}, headers=_auth(token))
+    assert r.status_code == 200
+
+    assert calls == [(staff.id, StaffStatus.active)]  # routed through the real state machine
+    db.refresh(staff)
+    assert staff.status == StaffStatus.active
+
+
 def test_approved_registrant_can_now_sign_in(client, db, make_school, make_staff):
     reg = client.post(REGISTER, json={
         "school_name": "Birchwood Academy", "registrant_email": "head@birchwood.edu",
@@ -398,7 +435,7 @@ def test_decide_school_unexpected_failure_rolls_back(client, db, make_school, ma
     def _boom(*_a: object, **_k: object) -> None:
         raise RuntimeError("db went away")
 
-    monkeypatch.setattr(schools_svc.identity_db, "activate_invited_staff_in_school", _boom)
+    monkeypatch.setattr(schools_svc.identity_db, "list_invited_staff_in_school", _boom)
 
     pending = make_school(code="PEND-BOOM", status=SchoolStatus.pending)
     token = _district_token(db, make_school, make_staff)

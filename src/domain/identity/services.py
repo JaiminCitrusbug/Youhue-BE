@@ -143,19 +143,19 @@ def get_registrant_of_school(db: Session, school_id: uuid.UUID) -> StaffAccount 
     )
 
 
-def activate_invited_staff_in_school(db: Session, school_id: uuid.UUID) -> None:
-    """FR-02-02: approval activates the school AND its registrant together (FR-02-01's registrant
-    is deliberately left ``invited`` — see ``application/schools/services.py`` — because it becomes
-    usable only here). Every still-``invited`` account at the school is activated, not only one row,
-    so the guarantee holds even if more than one invited account exists."""
-    staff_rows = db.scalars(
-        select(StaffAccount).where(
-            StaffAccount.school_id == school_id, StaffAccount.status == StaffStatus.invited
+def list_invited_staff_in_school(db: Session, school_id: uuid.UUID) -> list[StaffAccount]:
+    """FR-02-02: every still-``invited`` account at a school (FR-02-01's registrant is
+    deliberately left ``invited`` — see ``application/schools/services.py`` — because it becomes
+    usable only on approval), for the caller to walk through the real lifecycle graph (FR-02-04:
+    ``staff_lifecycle.advance_to``) rather than jumping straight to ``active``. Not only one row —
+    the guarantee holds even if more than one invited account exists at the school."""
+    return list(
+        db.scalars(
+            select(StaffAccount).where(
+                StaffAccount.school_id == school_id, StaffAccount.status == StaffStatus.invited
+            )
         )
     )
-    for staff in staff_rows:
-        staff.status = StaffStatus.active
-    db.flush()
 
 
 def count_students_in_school(db: Session, school_id: uuid.UUID) -> int:
