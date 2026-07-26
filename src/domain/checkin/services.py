@@ -132,6 +132,26 @@ def get_checkin_by_client_entry_id(
     )
 
 
+def list_checkins_for_students_between(
+    db: Session, student_ids: list[uuid.UUID], start: datetime, end: datetime
+) -> list[CheckIn]:
+    """FR-10-01 — every check-in ANY of `student_ids` submitted in `[start, end)`; the caller (the
+    dashboard's mood-index owner) has already resolved `student_ids` to the caller's own
+    accessible class roster. Empty `student_ids` short-circuits to no query (a class with zero
+    members is a valid, non-error state — an empty mood index, not a crash)."""
+    if not student_ids:
+        return []
+    return list(
+        db.scalars(
+            select(CheckIn).where(
+                CheckIn.student_id.in_(student_ids),
+                CheckIn.submitted_at >= start,
+                CheckIn.submitted_at < end,
+            )
+        )
+    )
+
+
 def get_unscored_for_update(db: Session) -> list[CheckIn]:
     return list(
         db.scalars(select(CheckIn).where(CheckIn.scored.is_(False)).with_for_update(skip_locked=True))

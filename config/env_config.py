@@ -85,6 +85,19 @@ class Settings(BaseSettings):
     # platform default concern-word list (school lists override; PLACEHOLDER — needs ratification)
     default_concern_words: str = "hurt,scared,alone,hate,worthless,hopeless,unsafe,help"
 
+    # ---- class dashboard mood index (FR-10-01) — D-18 weighting is NOT ratified. Interim,
+    # env-driven default: unweighted arithmetic mean of in-window CheckIn.mood_value (0..5),
+    # scaled *2 onto the approved screen's 0..10 display range. Same placeholder-pending-
+    # ratification posture as `default_concern_words`/mood-set above — never hard-coded,
+    # never invented/ratified by the FE. `dashboard_mood_index_scale` is the only tunable exposed
+    # today; the actual WEIGHTING scheme (e.g. recency-weighted) is D-18's open question, not this
+    # ticket's to answer — see docs/tickets/FR-10-01.md §Must-nots.
+    dashboard_mood_index_scale: float = 2.0
+
+    # ---- class dashboard trend (FR-10-01) — the minimum |delta| (on the 0..10 display scale)
+    # before the trend is reported as up/down rather than flat; avoids reporting noise as a trend.
+    dashboard_trend_flat_threshold: float = 0.05
+
     # ---- rate limiting (sign-in / token endpoints) ----
     rate_limit_signin_per_minute: int = 10
     # Public school self-registration (FR-02-01) gets its OWN, tighter bucket: an anonymous

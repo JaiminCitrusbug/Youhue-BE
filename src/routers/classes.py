@@ -3,12 +3,18 @@ classes to populate its 'Shared class' picker with real data, never a fixture �
 exposed a class-list read endpoint. Mirrors the established minimal-GET-add precedent (FR-02-02's
 two read endpoints, FR-03-05's ``GET /schools/{id}/roster``): not in the ticket's literal "What to
 build", added because rendering the approved screen honestly requires something real to read.
+
+FR-10-01 adds the class dashboard read.
 """
+import uuid
+
 from fastapi import APIRouter
 
 from src.application.classes import services as classes_svc
+from src.application.dashboard import services as dashboard_svc
 from src.infrastructure.middlewares.auth_middleware import DbDep, StaffDep
 from src.schemas.classes import MyClassesResponse
+from src.schemas.dashboard import ClassDashboardOut
 
 router = APIRouter(prefix="/classes", tags=["classes"])
 
@@ -17,3 +23,13 @@ router = APIRouter(prefix="/classes", tags=["classes"])
 def get_my_classes(staff: StaffDep, db: DbDep) -> MyClassesResponse:
     """Read-only — no transaction to commit/roll back."""
     return classes_svc.list_owned_classes(db, staff)
+
+
+@router.get(
+    "/{class_id}/dashboard",
+    response_model=ClassDashboardOut,
+    responses={403: {"description": "Not this staff member's own/shared class."}},
+)
+def get_class_dashboard(class_id: uuid.UUID, staff: StaffDep, db: DbDep) -> ClassDashboardOut:
+    """FR-10-01 — read-only, no transaction to commit/roll back."""
+    return dashboard_svc.get_class_dashboard(db, staff, class_id)

@@ -50,6 +50,15 @@ def get_class(db: Session, class_id: uuid.UUID) -> ClassGroup | None:
     return db.get(ClassGroup, class_id)
 
 
+def get_student_ids_in_class(db: Session, class_id: uuid.UUID) -> list[uuid.UUID]:
+    """FR-10-01 — the class roster's student ids, for the dashboard's mood-index aggregate."""
+    return list(
+        db.scalars(
+            select(ClassMembership.student_id).where(ClassMembership.class_id == class_id)
+        )
+    )
+
+
 def get_class_by_join_code(db: Session, code: str) -> ClassGroup | None:
     """A class join code resolves only within an ACTIVE school (FR-01-02 sign-in path)."""
     return db.scalar(

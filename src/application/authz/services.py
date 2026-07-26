@@ -3,6 +3,8 @@
 Fine-grained, role- AND school- AND class-scoped, decided server-side and tested as the disallowed
 actor (403). District sees aggregates only — never student-level rows.
 """
+import uuid
+
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -45,4 +47,25 @@ def can_access_student(db: Session, staff: StaffAccount, student: Student) -> bo
 
 def require_student_access(db: Session, staff: StaffAccount, student: Student) -> None:
     if not can_access_student(db, staff, student):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")
+
+
+def can_access_class(db: Session, staff: StaffAccount, class_id: uuid.UUID) -> bool:
+    """FR-10-01 (ticket §Must-nots: 'Teacher may read own/shared classes only'). Mirrors
+    `can_access_student`'s role/scope shape exactly, at the class level."""
+    if staff.role in _WHOLE_SCHOOL_ROLES:
+        klass = org_db.get_class(db, class_id)
+        return klass is not None and klass.school_id == staff.school_id
+    if staff.role == StaffRole.teacher:
+        scopes: tuple[StaffClassScope, ...] = _TEACHER_SCOPES
+    elif staff.role == StaffRole.support:
+        scopes = _SUPPORT_SCOPES
+    else:
+        return False
+    class_ids = org_db.get_class_ids_for_staff_in_school(db, staff.id, staff.school_id, scopes)
+    return class_id in class_ids
+
+
+def require_class_access(db: Session, staff: StaffAccount, class_id: uuid.UUID) -> None:
+    if not can_access_class(db, staff, class_id):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")
