@@ -15,3 +15,6 @@ bcrypt==4.2.1
 authlib==1.4.0
 httpx==0.28.1
 python-multipart==0.0.20
+# --- object storage (FR-20-01: school data export) — one boto3 S3-client path, MinIO in dev/test,
+# real AWS S3 in prod (endpoint_url differs; see config/env_config.py) ---
+boto3==1.43.56

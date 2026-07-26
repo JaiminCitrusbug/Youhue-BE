@@ -59,6 +59,18 @@ class Settings(BaseSettings):
     sendgrid_api_key: str | None = None           # required when ACTIVE_ENV=ACTIVE
     sendgrid_webhook_secret: str | None = None
 
+    # ---- object storage (FR-20-01) — ONE boto3 S3-client code path, both environments; only the
+    # endpoint/creds differ, matching this project's TEST/ACTIVE dual-flow posture but via a real
+    # S3-API client rather than a separate local-file adapter (owner decision, Batch-03):
+    #   TEST/dev    -> boto3 client with s3_endpoint_url pointed at a local MinIO instance
+    #   ACTIVE/prod -> boto3 client with s3_endpoint_url unset (None), talks to real AWS S3; creds
+    #                  come from standard AWS env vars / IAM role, not these dev defaults
+    s3_endpoint_url: str | None = "http://localhost:9000"  # None in prod -> real AWS S3
+    s3_bucket: str = "youhue-exports"
+    s3_region: str = "us-east-1"
+    s3_access_key: str = "youhue"  # local MinIO dev creds; prod uses real AWS credentials
+    s3_secret_key: str = "youhuesecret"  # noqa: S105 - local MinIO dev-only default, not a real secret
+
     # ---- staff SSO (INFRA-01) — real OAuth 2.0/OIDC, enabled per-provider when creds present ----
     oauth_redirect_base: str = "http://localhost:8000"
     frontend_base_url: str = "http://localhost:5173"  # SPA base for user-facing links (reset)

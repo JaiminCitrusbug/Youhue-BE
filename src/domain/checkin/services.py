@@ -28,6 +28,12 @@ def get_checkins_since(db: Session, student_id: uuid.UUID, since: datetime) -> l
     )
 
 
+def list_checkins_for_school(db: Session, school_id: uuid.UUID) -> list[CheckIn]:
+    """FR-20-01: every check-in belonging to one school — the school data export reads this
+    directly (school-scoped by construction, never cross-tenant)."""
+    return list(db.scalars(select(CheckIn).where(CheckIn.school_id == school_id)))
+
+
 # ---- FR-04-01: settings + writer ---------------------------------------------------------------
 
 

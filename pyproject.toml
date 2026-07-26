@@ -63,6 +63,11 @@ exclude = ["^alembic/", "^tests/", "^worktrees/"]
 module = ["authlib.*"]
 ignore_missing_imports = true
 
+# boto3/botocore (FR-20-01 object storage) ship no py.typed / stubs package installed here.
+[[tool.mypy.overrides]]
+module = ["boto3.*", "botocore.*"]
+ignore_missing_imports = true
+
 [tool.bandit]
 # the kit gate runs `bandit -r . -ll`; scan our source only — not third-party deps, autogen, tests.
 exclude_dirs = [".venv", "tests", "alembic"]

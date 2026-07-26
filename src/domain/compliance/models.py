@@ -42,6 +42,9 @@ class DataExport(Base):
         nullable=False,
         default=DataExportStatus.pending,
     )
+    # FR-20-01: the object-storage key of the finished artifact — unset while pending, set the
+    # moment the artifact is durably written and status flips to ready (migration a7e9c1f34b56).
+    storage_key: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

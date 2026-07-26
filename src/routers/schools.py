@@ -16,13 +16,16 @@ and a plain STRING for 403/404/429/500, but FastAPI's built-in 422 is an ARRAY o
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 
 from src.application.billing import services as billing_svc
+from src.application.compliance import export_services as export_svc
 from src.application.roster import services as roster_svc
 from src.application.schools import services as schools_svc
+from src.infrastructure import storage
 from src.infrastructure.middlewares.auth_middleware import DbDep, StaffDep
 from src.infrastructure.middlewares.ratelimit import rate_limit_registration
+from src.schemas.compliance import ExportAccepted, ExportRequest, ExportStatusOut
 from src.schemas.roster import (
     RosterErrorResponse,
     RosterImportResponse,
@@ -338,3 +341,59 @@ def reconcile_roster(
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Reconciliation failed") from exc
     db.commit()
     return result
+
+
+@router.post(
+    "/{school_id}/export",
+    response_model=ExportAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        status.HTTP_403_FORBIDDEN: {
+            "description": "Caller is not authorised leadership, or a different school (GATE G-12)."
+        },
+    },
+)
+def request_export(
+    school_id: uuid.UUID, body: ExportRequest, staff: StaffDep, db: DbDep,
+    background_tasks: BackgroundTasks,
+) -> ExportAccepted:
+    """FR-20-01 (GATE G-12) — an authorised leadership user requests an export of their OWN
+    school's data. 202 immediately (the row is created; the artifact is built and written to
+    object storage AFTER this response is sent — poll `GET .../exports/{id}` for `status=ready`)."""
+    try:
+        export = export_svc.request_export(db, staff, school_id, body.kind)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:  # noqa: BLE001 — last-resort guard: never leak a partial write
+        db.rollback()
+        logger.exception("fr_20_01_error action=request_export")
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not start the export"
+        ) from exc
+    db.commit()
+    background_tasks.add_task(export_svc.build_and_store_export, export.id)
+    return ExportAccepted(export_id=export.id, status=export.status)
+
+
+@router.get(
+    "/{school_id}/exports/{export_id}",
+    response_model=ExportStatusOut,
+    responses={
+        status.HTTP_403_FORBIDDEN: {"description": "Caller is not authorised leadership."},
+        status.HTTP_404_NOT_FOUND: {"description": "Unknown export, or a different school's."},
+    },
+)
+def get_export(
+    school_id: uuid.UUID, export_id: uuid.UUID, staff: StaffDep, db: DbDep
+) -> ExportStatusOut:
+    """Poll the export's status — `ready` once the background write completes (see the ticket's
+    202-accepted -> 200-export_ready async contract)."""
+    export = export_svc.get_export_status(db, staff, school_id, export_id)
+    download_url = (
+        storage.get_presigned_url(export.storage_key) if export.storage_key else None
+    )
+    return ExportStatusOut(
+        export_id=export.id, kind=export.kind, status=export.status, created_at=export.created_at,
+        download_url=download_url,
+    )

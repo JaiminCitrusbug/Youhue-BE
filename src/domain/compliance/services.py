@@ -5,8 +5,8 @@ from typing import TypeVar
 
 from sqlalchemy.orm import Session
 
-from src.constants.enums import ParentalConsentStatus
-from src.domain.compliance.models import AuditLog, ParentalConsent
+from src.constants.enums import DataExportKind, DataExportStatus, ParentalConsentStatus
+from src.domain.compliance.models import AuditLog, DataExport, ParentalConsent
 from src.domain.identity.models import Student
 
 T = TypeVar("T")
@@ -56,3 +56,25 @@ def upsert_consent(
         row.captured_at = now
     db.flush()
     return row
+
+
+def create_export(
+    db: Session, *, school_id: uuid.UUID, requested_by: uuid.UUID, kind: DataExportKind
+) -> DataExport:
+    row = DataExport(
+        school_id=school_id, requested_by=requested_by, kind=kind, status=DataExportStatus.pending
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def get_export(db: Session, export_id: uuid.UUID) -> DataExport | None:
+    return db.get(DataExport, export_id)
+
+
+def mark_export_ready(db: Session, export: DataExport, storage_key: str) -> DataExport:
+    export.storage_key = storage_key
+    export.status = DataExportStatus.ready
+    db.flush()
+    return export
