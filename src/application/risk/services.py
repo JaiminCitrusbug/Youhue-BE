@@ -210,7 +210,7 @@ def set_alert_config(
 def decide_band(risk_score: float) -> FlagBand:
     """FR-12-06: single owner of the band decision (render-only downstream). Cut-offs are
     environment-configurable (`settings.risk_immediate_threshold` / `risk_triage_threshold`, D-05
-    pending BA/SA ratification — carried as a config-driven placeholder like every other
+    pending BA/SA ratification — a config-driven default, same posture as every other
     pending-ratification cut-off this project has shipped) and default to erring toward triage over
     silence: the triage threshold is the lower, more inclusive bound, so an ambiguous score lands in
     triage (human review) rather than falling through to no action."""
