@@ -163,7 +163,22 @@ def get_invitation(db: Session, invitation_id: uuid.UUID) -> Invitation | None:
 
 
 def get_invitation_by_token(db: Session, token: str) -> Invitation | None:
+    """Exact-token match only (the live, current link). FR-02-04's superseded-link recognition
+    uses ``get_invitation_by_any_token`` below, which also matches a since-superseded token —
+    kept separate so every OTHER caller of this function keeps its existing "only a real, live
+    token resolves" semantics unchanged."""
     return db.scalar(select(Invitation).where(Invitation.token == token))
+
+
+def get_invitation_by_any_token(db: Session, token: str) -> Invitation | None:
+    """FR-02-04: resolve ``token`` against the CURRENT token OR the token a resend just
+    superseded, so the holder of an old link is recognised specifically as "superseded" (ticket
+    Scenario 3) rather than falling into the same bucket as a token that never existed."""
+    return db.scalar(
+        select(Invitation).where(
+            (Invitation.token == token) | (Invitation.previous_token == token)
+        )
+    )
 
 
 def list_invitations_for_class(db: Session, class_id: uuid.UUID) -> list[Invitation]:

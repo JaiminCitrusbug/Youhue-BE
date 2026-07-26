@@ -21,6 +21,7 @@ from src.routers.notifications import router as notifications_router
 from src.routers.risk import router as risk_router
 from src.routers.schools import router as schools_router
 from src.routers.staff_auth import router as staff_auth_router
+from src.routers.staff_lifecycle import router as staff_lifecycle_router
 from src.routers.student_auth import router as student_auth_router
 from src.routers.students import router as students_router
 
@@ -42,3 +43,4 @@ app.include_router(invitations_router, prefix=settings.api_prefix)
 app.include_router(classes_router, prefix=settings.api_prefix)
 app.include_router(alert_config_router, prefix=settings.api_prefix)
 app.include_router(entitlements_router, prefix=settings.api_prefix)
+app.include_router(staff_lifecycle_router, prefix=settings.api_prefix)

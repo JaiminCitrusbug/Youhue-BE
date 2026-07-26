@@ -12,9 +12,15 @@ shared-only (``application.authz.services._SUPPORT_SCOPES``), so "shared class o
 school" is enforced by the SAME mechanism every other student-access check already relies on, not a
 parallel rule invented for this ticket.
 
-Re-send issues a FRESH token (overwriting the row's ``token`` column) — the old token immediately
-stops resolving via ``get_invitation_by_token``, which is what makes a superseded invitation die.
-Revoke sets ``status=revoked``; accept checks status is still invited/sent before doing anything.
+Re-send issues a FRESH token (overwriting the row's ``token`` column, after saving the old one to
+``previous_token`` — FR-02-04) — the old token immediately stops resolving via
+``get_invitation_by_token``, which is what makes a superseded invitation die. Revoke sets
+``status=revoked``; accept checks status is still invited/sent before doing anything.
+
+FR-02-04 (staff lifecycle accuracy): a StaffAccount created here is walked through
+invited -> sent -> accepted -> active via ``staff_lifecycle.advance_to`` (never default-constructed
+straight at ``active``), and a stale-token holder gets a message SPECIFIC to why the link is dead
+(superseded by resend / revoked / expired), not one generic bucket (ticket Scenario 3).
 
 Structured logs: ``fr_02_03_success`` / ``_rejected`` / ``_forbidden`` / ``_error``.
 """
@@ -27,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from config.env_config import settings
 from src.application.isolation import services as isolation_svc
+from src.application.staff_lifecycle import services as staff_lifecycle
 from src.constants.enums import InvitationStatus, StaffClassScope, StaffRole, StaffStatus
 from src.domain.identity import services as identity_db
 from src.domain.identity.models import StaffAccount
@@ -55,10 +62,38 @@ _ALREADY_ACTIONED = HTTPException(
 )
 _ALREADY_INVITED = HTTPException(status.HTTP_409_CONFLICT, "Already invited")
 _INVALID_OR_EXPIRED = HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired invitation")
+# FR-02-04 Scenario 3: a superseded/revoked/expired link gets a SPECIFIC reason, never the one
+# generic bucket above (still returned for a token that never existed at all — genuinely
+# indistinguishable from "not found").
+_SUPERSEDED = HTTPException(
+    status.HTTP_400_BAD_REQUEST,
+    "This invitation is no longer valid — a newer invitation has been sent. "
+    "Please use the most recent invite email.",
+)
+_REVOKED = HTTPException(
+    status.HTTP_400_BAD_REQUEST, "This invitation has been revoked and is no longer valid."
+)
+_EXPIRED = HTTPException(
+    status.HTTP_400_BAD_REQUEST, "This invitation has expired and is no longer valid."
+)
 _PASSWORD_REQUIRED = HTTPException(
     status.HTTP_422_UNPROCESSABLE_ENTITY, "A password is required to create your account"
 )
 _ACCOUNT_DEACTIVATED = HTTPException(status.HTTP_403_FORBIDDEN, "Account is deactivated")
+
+
+def _specific_invalid_reason(invitation: Invitation, presented_token: str) -> HTTPException:
+    """FR-02-04 Scenario 3: turn a resolved-but-unusable invitation row into the SPECIFIC reason
+    it's dead, instead of the one generic bucket. Only reached once ``get_invitation_by_any_token``
+    has already found a real row — a token that matches nothing at all still gets the generic
+    ``_INVALID_OR_EXPIRED``, which is honest (there's no "reason" to report for pure garbage)."""
+    if invitation.token != presented_token:
+        return _SUPERSEDED  # matched via previous_token — a resend superseded this exact link
+    if invitation.status == InvitationStatus.revoked:
+        return _REVOKED
+    if invitation.status == InvitationStatus.expired or invitation.expires_at <= datetime.now(UTC):
+        return _EXPIRED
+    return _INVALID_OR_EXPIRED
 
 
 def _require_class_owner(db: Session, staff: StaffAccount, class_id: uuid.UUID) -> None:
@@ -201,6 +236,7 @@ def action_on_invitation(
 
     klass = org_db.get_class(db, class_id)
     class_name = klass.name if klass is not None else ""
+    invitation.previous_token = invitation.token  # FR-02-04: recognise the old link specifically
     invitation.token = security.new_url_token()  # fresh token — the old one stops resolving
     invitation.expires_at = datetime.now(UTC) + _INVITATION_TTL
     _dispatch(invitation, class_name)
@@ -216,14 +252,15 @@ def preview_invitation(db: Session, token: str) -> InvitationPreviewResponse:
     """GET-side, read-only: what SC-019 shows BEFORE the invitee commits. No write, no side
     effect — an expired invitation here is just reported invalid; it is marked ``expired`` only
     on an actual accept attempt (``accept_invitation`` below)."""
-    invitation = org_db.get_invitation_by_token(db, token)
-    if (
-        invitation is None
-        or invitation.class_id is None
-        or invitation.status not in (InvitationStatus.invited, InvitationStatus.sent)
-        or invitation.expires_at <= datetime.now(UTC)
-    ):
+    invitation = org_db.get_invitation_by_any_token(db, token)
+    if invitation is None or invitation.class_id is None:
         raise _INVALID_OR_EXPIRED
+    if (
+        invitation.status not in (InvitationStatus.invited, InvitationStatus.sent)
+        or invitation.expires_at <= datetime.now(UTC)
+        or invitation.token != token
+    ):
+        raise _specific_invalid_reason(invitation, token)
     klass = org_db.get_class(db, invitation.class_id)
     inviter = identity_db.get_staff(db, invitation.inviter_id)
     return InvitationPreviewResponse(
@@ -239,20 +276,24 @@ def accept_invitation(
     token, never a session. Creates the colleague's account (``StaffRole.support``, shared-scoped)
     if they have none at this school yet; otherwise reuses/activates their existing account and
     just grants the extra class access — no whole-school access is ever granted either way."""
-    invitation = org_db.get_invitation_by_token(db, token)
-    if (
-        invitation is None
-        or invitation.class_id is None
-        or invitation.status not in (InvitationStatus.invited, InvitationStatus.sent)
-    ):
+    invitation = org_db.get_invitation_by_any_token(db, token)
+    if invitation is None or invitation.class_id is None:
         logger.info("fr_02_03_rejected reason=invalid_or_used_token")
         raise _INVALID_OR_EXPIRED
+    if invitation.status not in (InvitationStatus.invited, InvitationStatus.sent) or (
+        invitation.token != token
+    ):
+        logger.info(
+            "fr_02_03_rejected reason=invalid_or_used_token invitation_id=%s status=%s",
+            invitation.id, invitation.status.value,
+        )
+        raise _specific_invalid_reason(invitation, token)
     class_id: uuid.UUID = invitation.class_id
     if invitation.expires_at <= datetime.now(UTC):
         invitation.status = InvitationStatus.expired
         db.flush()
         logger.info("fr_02_03_rejected reason=expired invitation_id=%s", invitation.id)
-        raise _INVALID_OR_EXPIRED
+        raise _EXPIRED
 
     existing_staff = identity_db.get_staff_by_email_in_school(
         db, invitation.email, invitation.school_id
@@ -264,22 +305,26 @@ def accept_invitation(
             )
             raise _ACCOUNT_DEACTIVATED
         staff = existing_staff
-        if staff.status == StaffStatus.invited:
-            staff.status = StaffStatus.active
+        # FR-02-04: an already-invited account (e.g. self-registered but not yet approved, or
+        # invited to a different class earlier) walks the real graph to `active`, never jumps.
+        staff_lifecycle.advance_to(db, staff, StaffStatus.active)
     else:
         if not password:
             logger.info(
                 "fr_02_03_rejected reason=password_required invitation_id=%s", invitation.id
             )
             raise _PASSWORD_REQUIRED
+        # FR-02-04: created at the model's least-privilege `invited` default, then walked through
+        # every named state in turn (invited -> sent -> accepted -> active) within this same
+        # transaction — never default-constructed straight at `active`.
         staff = identity_db.create_staff(
             db,
             school_id=invitation.school_id,
             email=invitation.email,
             password_hash=security.hash_password(password),
             role=StaffRole.support,
-            status=StaffStatus.active,
         )
+        staff_lifecycle.advance_to(db, staff, StaffStatus.active)
 
     org_db.grant_class_access(db, staff.id, class_id, scope=StaffClassScope.shared)
     invitation.status = InvitationStatus.accepted

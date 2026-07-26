@@ -31,6 +31,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from src.application.authz import services as authz
+from src.application.staff_lifecycle import services as staff_lifecycle
 from src.constants.enums import StaffRole, StaffStatus
 from src.domain.identity import services as identity_db
 from src.domain.identity.models import StaffAccount
@@ -101,10 +102,10 @@ def deactivate_staff(
         )
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Staff not found")
 
-    # Idempotent on retry [BR-05]: PATCHing an already-deactivated account is a no-op success, not
-    # an error — a retried request never fails on the second attempt.
-    target.status = StaffStatus.deactivated
-    db.flush()
+    # FR-02-04: routed through the one shared state machine (`staff_lifecycle.transition`) — same
+    # idempotent-no-op-on-retry behaviour as before [BR-05], now backed by a real legal-transition
+    # graph instead of an unconditional assignment.
+    staff_lifecycle.transition(db, target, StaffStatus.deactivated)
     logger.info(
         "fr_16_02_success action=update_staff actor_id=%s staff_id=%s status=deactivated",
         actor.id, staff_id,

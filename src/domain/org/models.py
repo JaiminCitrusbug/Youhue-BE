@@ -67,6 +67,10 @@ class Invitation(Base):
     inviter_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("staff_accounts.id"), nullable=False)
     email: Mapped[str] = mapped_column(String, nullable=False)
     token: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    # FR-02-04: the token a resend just superseded (set right before ``token`` is overwritten).
+    # Lets a holder of the OLD link still be recognised specifically as "superseded" (Scenario 3)
+    # instead of falling into the same generic bucket as a token that never existed at all.
+    previous_token: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     status: Mapped[InvitationStatus] = mapped_column(
         Enum(InvitationStatus, name="invitation_status"),
         nullable=False,
