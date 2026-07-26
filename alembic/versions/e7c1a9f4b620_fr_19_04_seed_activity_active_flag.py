@@ -7,7 +7,7 @@ Single alembic head (chains off the FR-19-01 admin-role migration); tests build 
 real chain, so model/migration drift fails the suite.
 
 Revision ID: e7c1a9f4b620
-Revises: b3d9f1a4c7e2
+Revises: f7a3c9e21b04
 Create Date: 2026-07-23 11:00:00.000000
 
 """
@@ -19,7 +19,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "e7c1a9f4b620"
-down_revision: Union[str, None] = "b3d9f1a4c7e2"
+down_revision: Union[str, None] = "f7a3c9e21b04"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

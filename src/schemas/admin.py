@@ -8,7 +8,13 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-from src.constants.enums import ActivityAgeBand, ActivityType, SchoolStatus, SchoolTier, SubscriptionState
+from src.constants.enums import (
+    ActivityAgeBand,
+    ActivityType,
+    SchoolStatus,
+    SchoolTier,
+    SubscriptionState,
+)
 from src.domain.checkin.models import Activity
 
 
