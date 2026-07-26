@@ -91,11 +91,25 @@ def get_class_dashboard(
     # `require_class_access` 403s for BOTH "not this staff member's own/shared class" AND "no such
     # class" (a nonexistent id resolves to no accessible class either way) — deliberately never
     # distinguishes the two responses, so a caller cannot probe for another school's class ids.
-    authz.require_class_access(db, staff, class_id)
+    try:
+        authz.require_class_access(db, staff, class_id)
+    except HTTPException:
+        logger.warning(
+            "fr_10_03_forbidden action=get_dashboard actor_id=%s class_id=%s",
+            staff.id, class_id,
+        )
+        raise
     # `require_class_access` above already guarantees a real, accessible class row exists.
     klass = cast(ClassGroup, org_db.get_class(db, class_id))
 
-    period_key, around = _parse_range(range_param)
+    try:
+        period_key, around = _parse_range(range_param)
+    except HTTPException:
+        logger.info(
+            "fr_10_03_rejected action=get_dashboard actor_id=%s class_id=%s "
+            "reason=invalid_range range=%s", staff.id, class_id, range_param,
+        )
+        raise
     config = org_db.get_calendar_config(db, staff.school_id)
     # FR-10-03: changing the filter RE-FETCHES against FR-07-04's real resolution — it never
     # re-derives the previously-shown figures from the already-fetched window (ticket §Must-nots).
@@ -118,6 +132,10 @@ def get_class_dashboard(
     logger.info(
         "fr_10_01_success action=get_dashboard actor_id=%s class_id=%s mood_index=%s trend=%s "
         "period=%s", staff.id, class_id, current_index, trend, period_key,
+    )
+    logger.info(
+        "fr_10_03_success action=get_dashboard actor_id=%s class_id=%s range=%s period=%s",
+        staff.id, class_id, range_param, period_key,
     )
     return ClassDashboardOut(
         class_id=str(class_id),

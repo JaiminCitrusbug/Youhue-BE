@@ -6,9 +6,10 @@ build", added because rendering the approved screen honestly requires something 
 
 FR-10-01 adds the class dashboard read.
 """
+import logging
 import uuid
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query, status
 
 from src.application.classes import services as classes_svc
 from src.application.dashboard import services as dashboard_svc
@@ -16,6 +17,7 @@ from src.infrastructure.middlewares.auth_middleware import DbDep, StaffDep
 from src.schemas.classes import MyClassesResponse
 from src.schemas.dashboard import ClassDashboardOut, ClassRosterOut
 
+logger = logging.getLogger("youhue.dashboard")
 router = APIRouter(prefix="/classes", tags=["classes"])
 
 
@@ -41,7 +43,17 @@ def get_class_dashboard(
 ) -> ClassDashboardOut:
     """FR-10-01/FR-10-03 — read-only, no transaction to commit/roll back. `range` omitted defaults
     to `this_week` (unchanged FR-10-01 behaviour)."""
-    return dashboard_svc.get_class_dashboard(db, staff, class_id, range)
+    try:
+        return dashboard_svc.get_class_dashboard(db, staff, class_id, range)
+    except HTTPException:
+        raise  # already logged (fr_10_03_forbidden / _rejected) at the point it was raised
+    except Exception as exc:  # noqa: BLE001 — last-resort guard: never leak an unhandled 500
+        logger.exception(
+            "fr_10_03_error action=get_dashboard actor_id=%s class_id=%s", staff.id, class_id
+        )
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not load the dashboard"
+        ) from exc
 
 
 @router.get(
