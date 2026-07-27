@@ -24,6 +24,7 @@ refusal instead of a silent UTC/server-default fallback, and the same corrupted-
 Structured logs: `fr_07_03_success` / `_rejected` / `_forbidden` / `_error` (ticket §DoD, SRS §K).
 """
 import logging
+import random
 import uuid
 from datetime import UTC, datetime, time, timedelta
 from typing import Literal
@@ -35,11 +36,12 @@ from sqlalchemy.orm import Session
 
 from config.env_config import settings
 from src.application.compliance import services as compliance_svc
-from src.constants.enums import StudentAgeBand
+from src.constants.enums import ActivityAgeBand, ActivityEngagementStatus, StudentAgeBand
 from src.domain.checkin import services as checkin_db
-from src.domain.checkin.models import CheckIn
+from src.domain.checkin.models import Activity, ActivityEngagement, CheckIn
 from src.domain.identity.models import Student
 from src.domain.org import services as org_db
+from src.schemas.checkin import ActivityOfferOut
 
 logger = logging.getLogger("youhue.checkin")
 
@@ -465,3 +467,60 @@ def sync_checkin(
         "fr_04_06_success action=sync_checkin student_id=%s checkin_id=%s", student.id, row.id
     )
     return row, True
+
+
+# =================================================================================================
+# FR-05-01 — offer a short guided activity after a check-in, and record whether the student
+# started or completed it. Optional and NEVER blocks the check-in (ticket §NEG, Scenario 2):
+# `offer_activity` is called by the router as its OWN best-effort step, same posture as FR-12-01's
+# `_score_after_create` (a failure here can never fail the check-in response, which already
+# succeeded). "Whether the activity was started/completed is recorded" is an assumption pending
+# client confirmation per the ticket's own text — carried as recorded engagement, no further product
+# decision made (e.g. no forced start-before-complete ordering).
+# =================================================================================================
+
+
+def offer_activity(db: Session, student: Student, checkin: CheckIn) -> ActivityOfferOut | None:
+    """Offer ONE short guided activity from the active seed set matching the caller's age band (or
+    the band-agnostic `all`), and record it as `offered` against this check-in. An empty/no-match
+    seed set for the band is a valid state, not an error — `activity_offer` stays null (ticket does
+    not require a seed activity to exist for every band)."""
+    candidates = [
+        activity
+        for activity in checkin_db.list_seed_activities(db, include_retired=False)
+        if activity.age_band in (student.age_band, ActivityAgeBand.all)
+    ]
+    if not candidates:
+        return None
+    activity = random.choice(candidates)  # noqa: S311 — offer selection, not security/crypto
+    checkin_db.create_activity_engagement(
+        db, student_id=student.id, activity_id=activity.id, checkin_id=checkin.id
+    )
+    return ActivityOfferOut(activity_id=activity.id, title=activity.title, type=activity.type.value)
+
+
+def record_activity_engagement(
+    db: Session, student: Student, checkin_id: uuid.UUID, new_status: ActivityEngagementStatus
+) -> tuple[Activity, ActivityEngagement]:
+    """`POST /check-ins/{id}/activity` — record that the caller started or completed the activity
+    offered on their OWN check-in `checkin_id`. A check-in that does not exist, is not the caller's
+    own, or was never offered an activity all resolve to the SAME 404 (the lookup is scoped by
+    student_id itself, not a separate ownership check) — never leaking which case it was."""
+    engagement = checkin_db.get_activity_engagement_for_checkin(db, checkin_id, student.id)
+    if engagement is None:
+        logger.info(
+            "fr_05_01_rejected action=record_activity_engagement student_id=%s checkin_id=%s "
+            "reason=not_found", student.id, checkin_id,
+        )
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Activity not found")
+    activity = checkin_db.get_activity(db, engagement.activity_id)
+    if activity is None:  # pragma: no cover — FK guarantees this; defensive only
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Activity not found")
+    engagement.status = new_status
+    engagement.at = datetime.now(UTC)
+    db.flush()
+    logger.info(
+        "fr_05_01_success action=record_activity_engagement student_id=%s checkin_id=%s status=%s",
+        student.id, checkin_id, new_status.value,
+    )
+    return activity, engagement

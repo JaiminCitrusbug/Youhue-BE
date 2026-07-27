@@ -51,6 +51,28 @@ class CheckInOut(BaseModel):
     activity_offer: ActivityOfferOut | None = None
 
 
+class ActivityEngagementUpdate(BaseModel):
+    """FR-05-01 — `POST /api/v1/check-ins/{id}/activity` body: the caller reports that they
+    started or completed the activity offered on their own check-in. There is no "skip" verb —
+    skipping is simply never calling this endpoint (Scenario 2: the check-in stays complete
+    either way)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["started", "completed"]
+
+
+class ActivityEngagementOut(BaseModel):
+    activity_id: uuid.UUID
+    title: str
+    type: str
+    status: str
+
+
+class ActivityEngagementResponse(BaseModel):
+    activity: ActivityEngagementOut
+
+
 class MoodPointOut(BaseModel):
     """FR-08-01 — one point on the caller's own mood-over-time history."""
 

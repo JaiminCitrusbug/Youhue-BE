@@ -11,8 +11,13 @@ from datetime import date, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from src.constants.enums import ActivityAgeBand, ActivityScope, ActivityType
-from src.domain.checkin.models import Activity, CheckIn, CheckInSettings
+from src.constants.enums import (
+    ActivityAgeBand,
+    ActivityEngagementStatus,
+    ActivityScope,
+    ActivityType,
+)
+from src.domain.checkin.models import Activity, ActivityEngagement, CheckIn, CheckInSettings
 
 
 def get_checkins_since(db: Session, student_id: uuid.UUID, since: datetime) -> list[CheckIn]:
@@ -215,3 +220,43 @@ def list_seed_activities(db: Session, *, include_retired: bool = False) -> list[
     if not include_retired:
         stmt = stmt.where(Activity.active.is_(True))
     return list(db.scalars(stmt.order_by(Activity.title)))
+
+
+# ---- FR-05-01: post-check-in activity engagement (offer / start / complete) --------------------
+
+
+def get_activity(db: Session, activity_id: uuid.UUID) -> Activity | None:
+    return db.get(Activity, activity_id)
+
+
+def create_activity_engagement(
+    db: Session,
+    *,
+    student_id: uuid.UUID,
+    activity_id: uuid.UUID,
+    checkin_id: uuid.UUID | None,
+    status: ActivityEngagementStatus = ActivityEngagementStatus.offered,
+) -> ActivityEngagement:
+    engagement = ActivityEngagement(
+        student_id=student_id, activity_id=activity_id, checkin_id=checkin_id, status=status
+    )
+    db.add(engagement)
+    db.flush()
+    return engagement
+
+
+def get_activity_engagement_for_checkin(
+    db: Session, checkin_id: uuid.UUID, student_id: uuid.UUID
+) -> ActivityEngagement | None:
+    """The engagement offered on `checkin_id`, scoped to `student_id` at the lookup itself (not
+    merely a runtime check) — a check-in that belongs to another student can never resolve here,
+    structurally, same self-only-scope shape as `list_checkins_for_student`. Most-recent first so a
+    check-in that (hypothetically) has more than one engagement row resolves to the latest offer."""
+    return db.scalar(
+        select(ActivityEngagement)
+        .where(
+            ActivityEngagement.checkin_id == checkin_id,
+            ActivityEngagement.student_id == student_id,
+        )
+        .order_by(ActivityEngagement.at.desc())
+    )

@@ -24,8 +24,12 @@ Every ticket Must-not / Scenario has a test that fails if the guarantee is remov
   MN-5 Self-only: a student session carries no student_id param; a staff session is denied.
        -> test_student_cannot_be_impersonated_no_id_param_exists
        -> test_staff_session_denied_403
-  MN-6 activity_offer is always null (FR-05-01 stub field, DEF-010).
-       -> test_activity_offer_is_always_null
+  MN-6 activity_offer (FR-05-01, closes DEF-010): null when no seed activity matches the caller's
+       age band; a real offer (+ an `offered` engagement row) when one does; null again on an
+       idempotent replay (never a second offer for the same check-in).
+       -> test_activity_offer_is_null_when_no_seed_activity_matches
+       -> test_activity_offer_returns_matching_seed_activity_and_records_engagement
+       -> test_activity_offer_is_null_on_idempotent_replay
   MN-7 The mood set is per-age-band and config-driven, not hard-coded.
        -> test_mood_set_endpoint_reflects_age_band_config
 
@@ -325,15 +329,73 @@ def test_no_auth_is_401():
     assert r.status_code in (401, 403)  # HTTPBearer auto_error -> 403 with no header, 401 bad token
 
 
-# ---- MN-6 — activity_offer stub -------------------------------------------------------------------
+# ---- MN-6 — activity_offer (FR-05-01, closes DEF-010) ----------------------------------------------
 
 
-def test_activity_offer_is_always_null(client, db, make_school, make_student):
+def test_activity_offer_is_null_when_no_seed_activity_matches(client, db, make_school, make_student):
+    """No seed activity exists at all in this test's DB -> a valid empty state, not an error."""
     school = make_school(code="CKS-16")
     student = make_student(school)
     token = _ready(db, client, school, student)
     r = client.post(CHECKINS, json={"mood_value": 4}, headers=_auth(token))
     assert r.json()["activity_offer"] is None
+
+
+def test_activity_offer_returns_matching_seed_activity_and_records_engagement(
+    client, db, make_school, make_student
+):
+    from sqlalchemy import select
+
+    from src.constants.enums import ActivityAgeBand, ActivityEngagementStatus, ActivityType
+    from src.domain.checkin import services as checkin_db_
+    from src.domain.checkin.models import ActivityEngagement
+
+    school = make_school(code="CKS-16B")
+    student = make_student(school, age_band=StudentAgeBand.b8_11)
+    token = _ready(db, client, school, student)
+    activity = checkin_db_.add_seed_activity(
+        db, title="Breathing break", type=ActivityType.breathing,
+        age_band=ActivityAgeBand.all, topic=None,
+    )
+    db.commit()
+
+    r = client.post(CHECKINS, json={"mood_value": 4}, headers=_auth(token))
+    assert r.status_code == 201
+    offer = r.json()["activity_offer"]
+    assert offer is not None
+    assert offer["activity_id"] == str(activity.id)
+    assert offer["title"] == "Breathing break"
+    assert offer["type"] == "breathing"
+
+    checkin_id = r.json()["checkin_id"]
+    engagement = db.scalar(
+        select(ActivityEngagement).where(ActivityEngagement.checkin_id == checkin_id)
+    )
+    assert engagement.student_id == student.id
+    assert engagement.activity_id == activity.id
+    assert engagement.status == ActivityEngagementStatus.offered
+
+
+def test_activity_offer_is_null_on_idempotent_replay(client, db, make_school, make_student):
+    from src.constants.enums import ActivityAgeBand, ActivityType
+    from src.domain.checkin import services as checkin_db_
+
+    school = make_school(code="CKS-16C")
+    student = make_student(school)
+    token = _ready(db, client, school, student)
+    checkin_db_.add_seed_activity(
+        db, title="Grounding", type=ActivityType.grounding, age_band=ActivityAgeBand.all, topic=None
+    )
+    db.commit()
+
+    first = client.post(CHECKINS, json={"mood_value": 4}, headers=_auth(token))
+    assert first.status_code == 201
+    assert first.json()["activity_offer"] is not None
+
+    replay = client.post(CHECKINS, json={"mood_value": 4}, headers=_auth(token))
+    assert replay.status_code == 201
+    assert replay.json()["checkin_id"] == first.json()["checkin_id"]
+    assert replay.json()["activity_offer"] is None
 
 
 # ---- MN-7 — config-driven mood set ------------------------------------------------------------------

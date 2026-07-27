@@ -3,15 +3,22 @@ CALLER's own account off the session — there is no `student_id` in the request
 can never submit on behalf of anyone else. Thin router — business logic lives in
 ``src.application.checkin.services``."""
 import logging
+import uuid
 
 from fastapi import APIRouter, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from src.application.checkin import services as checkin_svc
 from src.application.risk import services as risk_svc
+from src.constants.enums import ActivityEngagementStatus
 from src.domain.checkin.models import CheckIn
+from src.domain.identity.models import Student
 from src.infrastructure.middlewares.auth_middleware import DbDep, StudentDep
 from src.schemas.checkin import (
+    ActivityEngagementOut,
+    ActivityEngagementResponse,
+    ActivityEngagementUpdate,
+    ActivityOfferOut,
     CheckInConfigOut,
     CheckInCreate,
     CheckInOut,
@@ -78,9 +85,9 @@ def get_checkin_config(student: StudentDep) -> CheckInConfigOut:
     },
 )
 def submit_checkin(body: CheckInCreate, student: StudentDep, db: DbDep) -> CheckInOut:
-    """201 `{checkin_id, activity_offer}` on success — `activity_offer` is always `null` here (see
-    ``src.schemas.checkin.ActivityOfferOut`` docstring: it is a typed stub for FR-05-01, a later
-    ticket, not a functional stub of this endpoint)."""
+    """201 `{checkin_id, activity_offer}` on success — `activity_offer` is populated (FR-05-01) only
+    on a genuinely NEW check-in (`created=True`); an idempotent replay of an exact retry returns
+    `activity_offer: null` rather than minting a second offer for the same check-in."""
     try:
         checkin, created = checkin_svc.submit_checkin(
             db, student, body.mood_value, body.reflection_text
@@ -93,9 +100,11 @@ def submit_checkin(body: CheckInCreate, student: StudentDep, db: DbDep) -> Check
             status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not record check-in"
         ) from exc
     db.commit()
+    activity_offer = None
     if created:
         _score_after_create(db, checkin)
-    return CheckInOut(checkin_id=checkin.id, activity_offer=None)
+        activity_offer = _offer_activity_after_create(db, student, checkin)
+    return CheckInOut(checkin_id=checkin.id, activity_offer=activity_offer)
 
 
 def _score_after_create(db: Session, checkin: CheckIn) -> None:
@@ -111,6 +120,23 @@ def _score_after_create(db: Session, checkin: CheckIn) -> None:
     except Exception:  # noqa: BLE001 — scoring must never fail the check-in response
         db.rollback()
         logger.exception("fr_12_01_error action=submit_checkin checkin_id=%s", checkin.id)
+
+
+def _offer_activity_after_create(
+    db: Session, student: Student, checkin: CheckIn
+) -> ActivityOfferOut | None:
+    """FR-05-01: offer a short guided activity right after the check-in write durably lands. Same
+    best-effort posture as `_score_after_create` above — the check-in already committed
+    successfully, so a failure here (or no matching seed activity) must never fail the check-in
+    response; it only means `activity_offer` stays null."""
+    try:
+        offer = checkin_svc.offer_activity(db, student, checkin)
+        db.commit()
+        return offer
+    except Exception:  # noqa: BLE001 — offering must never fail the check-in response
+        db.rollback()
+        logger.exception("fr_05_01_error action=offer_activity checkin_id=%s", checkin.id)
+        return None
 
 
 @router.post(
@@ -162,9 +188,56 @@ def sync_checkin(
             status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not record the synced check-in"
         ) from exc
     db.commit()
+    activity_offer = None
     if created:
         _score_after_create(db, checkin)
+        activity_offer = _offer_activity_after_create(db, student, checkin)
         response.status_code = status.HTTP_201_CREATED
     else:
         response.status_code = status.HTTP_200_OK
-    return CheckInOut(checkin_id=checkin.id, activity_offer=None)
+    return CheckInOut(checkin_id=checkin.id, activity_offer=activity_offer)
+
+
+@router.post(
+    "/{checkin_id}/activity",
+    response_model=ActivityEngagementResponse,
+    responses={
+        status.HTTP_404_NOT_FOUND: {
+            "model": ErrorResponse,
+            "description": "No activity was offered on this check-in, or it isn't the caller's "
+            "own.",
+        },
+        status.HTTP_500_INTERNAL_SERVER_ERROR: {
+            "model": ErrorResponse,
+            "description": "Could not record the activity engagement.",
+        },
+    },
+)
+def update_activity_engagement(
+    checkin_id: uuid.UUID, body: ActivityEngagementUpdate, student: StudentDep, db: DbDep
+) -> ActivityEngagementResponse:
+    """FR-05-01 — record that the caller started or completed the activity offered on their own
+    check-in `checkin_id`. Optional and never blocks: skipping (never calling this endpoint) leaves
+    the check-in complete (ticket Scenario 2) — there is no "skip" verb to call here."""
+    try:
+        activity, engagement = checkin_svc.record_activity_engagement(
+            db, student, checkin_id, ActivityEngagementStatus(body.status)
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — last-resort guard, never leak an unhandled 500
+        logger.exception(
+            "fr_05_01_error action=update_activity_engagement student_id=%s", student.id
+        )
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not record the activity"
+        ) from exc
+    db.commit()
+    return ActivityEngagementResponse(
+        activity=ActivityEngagementOut(
+            activity_id=activity.id,
+            title=activity.title,
+            type=activity.type.value,
+            status=engagement.status.value,
+        )
+    )
