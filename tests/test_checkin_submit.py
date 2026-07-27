@@ -29,7 +29,9 @@ Every ticket Must-not / Scenario has a test that fails if the guarantee is remov
        idempotent replay (never a second offer for the same check-in).
        -> test_activity_offer_is_null_when_no_seed_activity_matches
        -> test_activity_offer_returns_matching_seed_activity_and_records_engagement
+       -> test_activity_offer_excludes_a_mismatched_age_band
        -> test_activity_offer_is_null_on_idempotent_replay
+       -> test_offer_activity_failure_never_fails_checkin_response
   MN-7 The mood set is per-age-band and config-driven, not hard-coded.
        -> test_mood_set_endpoint_reflects_age_band_config
 
@@ -376,6 +378,26 @@ def test_activity_offer_returns_matching_seed_activity_and_records_engagement(
     assert engagement.status == ActivityEngagementStatus.offered
 
 
+def test_activity_offer_excludes_a_mismatched_age_band(client, db, make_school, make_student):
+    """A seed activity scoped to a DIFFERENT band than the caller's (and not `all`) is never
+    offered — review Minor 3: only "empty seed set" and "all-band match" were previously proven;
+    this closes the actual exclusion branch with a real end-to-end assertion."""
+    from src.constants.enums import ActivityAgeBand, ActivityType
+
+    school = make_school(code="CKS-16E")
+    student = make_student(school, age_band=StudentAgeBand.b8_11)
+    token = _ready(db, client, school, student)
+    checkin_db.add_seed_activity(
+        db, title="Teen check-in", type=ActivityType.brain_break,
+        age_band=ActivityAgeBand.b12_18, topic=None,
+    )
+    db.commit()
+
+    r = client.post(CHECKINS, json={"mood_value": 4}, headers=_auth(token))
+    assert r.status_code == 201
+    assert r.json()["activity_offer"] is None  # the only seed activity is for a different band
+
+
 def test_activity_offer_is_null_on_idempotent_replay(client, db, make_school, make_student):
     from src.constants.enums import ActivityAgeBand, ActivityType
     from src.domain.checkin import services as checkin_db_
@@ -396,6 +418,27 @@ def test_activity_offer_is_null_on_idempotent_replay(client, db, make_school, ma
     assert replay.status_code == 201
     assert replay.json()["checkin_id"] == first.json()["checkin_id"]
     assert replay.json()["activity_offer"] is None
+
+
+def test_offer_activity_failure_never_fails_checkin_response(
+    client, db, make_school, make_student, monkeypatch
+):
+    """Same guarantee, same proof shape as FR-12-01's `test_scoring_failure_never_fails_checkin_
+    response` above (review-flagged gap: the claim existed in code/docstrings but had no test) — a
+    failure in the best-effort offer step must never surface as a failed check-in."""
+    from src.routers import checkins as checkins_router
+
+    school = make_school(code="CKS-16D")
+    student = make_student(school)
+    token = _ready(db, client, school, student)
+
+    def boom(_db, _student, _checkin):
+        raise RuntimeError("offer_activity exploded")
+
+    monkeypatch.setattr(checkins_router.checkin_svc, "offer_activity", boom)
+    r = client.post(CHECKINS, json={"mood_value": 4}, headers=_auth(token))
+    assert r.status_code == 201  # offer failure never surfaces as a failed check-in
+    assert r.json()["activity_offer"] is None
 
 
 # ---- MN-7 — config-driven mood set ------------------------------------------------------------------

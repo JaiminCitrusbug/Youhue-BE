@@ -505,7 +505,13 @@ def record_activity_engagement(
     """`POST /check-ins/{id}/activity` — record that the caller started or completed the activity
     offered on their OWN check-in `checkin_id`. A check-in that does not exist, is not the caller's
     own, or was never offered an activity all resolve to the SAME 404 (the lookup is scoped by
-    student_id itself, not a separate ownership check) — never leaking which case it was."""
+    student_id itself, not a separate ownership check) — never leaking which case it was.
+
+    No forbidden branch: unlike a 403, a 404 here is reported as `fr_05_01_rejected`, not
+    `fr_05_01_forbidden` — there is no cross-tenant/cross-role access being denied to log, only a
+    caller reading their own (possibly-nonexistent-to-them) engagement, same documented-absence
+    posture as `get_checkin_config`/`get_student_history`'s notes above; only
+    `fr_05_01_success`/`fr_05_01_rejected`/`fr_05_01_error` are reachable here."""
     engagement = checkin_db.get_activity_engagement_for_checkin(db, checkin_id, student.id)
     if engagement is None:
         logger.info(
