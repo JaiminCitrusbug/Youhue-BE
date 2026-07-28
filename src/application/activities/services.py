@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from src.application.authz import services as authz
 from src.domain.checkin import services as checkin_db
+from src.domain.checkin.models import Activity
 from src.domain.identity import services as identity_db
 from src.domain.identity.models import StaffAccount
 from src.domain.org import services as org_db
@@ -73,6 +74,14 @@ def _assign_to_student(db: Session, staff: StaffAccount, student_id: uuid.UUID) 
         )
         raise
     return [student.id]
+
+
+def list_seed_activities_for_staff(db: Session) -> list[Activity]:
+    """Minimal-GET-add (see `schemas.activities.SeedActivityListResponse` docstring) — any
+    authenticated staff role may read the active seed set (the router's `StaffDep` is the only
+    gate); no school/class scoping applies since the seed set is global
+    (`scope=seed, school_id=NULL`, per FR-19-04)."""
+    return checkin_db.list_seed_activities(db, include_retired=False)
 
 
 def run_or_assign_activity(

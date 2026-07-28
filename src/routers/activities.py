@@ -8,10 +8,29 @@ from fastapi import APIRouter, HTTPException, status
 
 from src.application.activities import services as activities_svc
 from src.infrastructure.middlewares.auth_middleware import DbDep, StaffDep
-from src.schemas.activities import ActivityRunRequest, ActivityRunResponse
+from src.schemas.activities import (
+    ActivityRunRequest,
+    ActivityRunResponse,
+    SeedActivityListResponse,
+    SeedActivityOut,
+)
 
 logger = logging.getLogger("youhue.activities")
 router = APIRouter(prefix="/activities", tags=["activities"])
+
+
+@router.get("/seed", response_model=SeedActivityListResponse)
+def list_seed_activities(staff: StaffDep, db: DbDep) -> SeedActivityListResponse:  # noqa: ARG001
+    """Minimal-GET-add — see `schemas.activities.SeedActivityListResponse` docstring. Read-only, no
+    transaction to commit/roll back. `staff` is unused beyond the `StaffDep` auth gate itself (any
+    authenticated staff member may read the global seed set)."""
+    activities = activities_svc.list_seed_activities_for_staff(db)
+    return SeedActivityListResponse(
+        activities=[
+            SeedActivityOut(id=a.id, title=a.title, type=a.type.value, topic=a.topic)
+            for a in activities
+        ]
+    )
 
 
 @router.post(

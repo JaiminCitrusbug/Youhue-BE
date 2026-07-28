@@ -24,6 +24,11 @@ class or assigns it to a specific student.
               -> test_shared_scope_support_role_can_run_with_class
   An empty class (no roster members) is a valid empty result, not an error.
               -> test_run_with_class_empty_roster_returns_empty_assigned
+
+GET /api/v1/activities/seed — minimal-GET-add, the teacher-facing read the ticket's own Scenario 1
+text ("Given a teacher is viewing the seed activity set") requires but the DoD section omits.
+  -> test_list_seed_activities_returns_active_set_only
+  -> test_list_seed_activities_requires_auth
 """
 import uuid
 
@@ -279,3 +284,29 @@ def test_run_with_class_empty_roster_returns_empty_assigned(
     )
     assert r.status_code == 200
     assert r.json()["assigned"] == []
+
+
+SEED = "/api/v1/activities/seed"
+
+
+def test_list_seed_activities_returns_active_set_only(db, client, make_school, make_staff):
+    school = make_school(code="RUN-13")
+    teacher = make_staff(school, email="t@run13.edu", role=StaffRole.teacher)
+    active = _seed_activity(db)
+    retired = checkin_db.add_seed_activity(
+        db, title="Old one", type=ActivityType.stretch, age_band=ActivityAgeBand.all, topic=None
+    )
+    retired.active = False
+    db.commit()
+
+    token = _mint(db, teacher)
+    r = client.get(SEED, headers=_auth(token))
+    assert r.status_code == 200
+    ids = {a["id"] for a in r.json()["activities"]}
+    assert str(active.id) in ids
+    assert str(retired.id) not in ids
+
+
+def test_list_seed_activities_requires_auth(client):
+    r = client.get(SEED)
+    assert r.status_code in (401, 403)
