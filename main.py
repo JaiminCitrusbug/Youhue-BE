@@ -6,6 +6,7 @@ mounted per ticket in execution order.
 from fastapi import FastAPI
 
 from config.env_config import settings
+from src.routers.activities import router as activities_router
 from src.routers.admin import router as admin_router
 from src.routers.alert_config import router as alert_config_router
 from src.routers.auth import me_router
@@ -44,3 +45,4 @@ app.include_router(classes_router, prefix=settings.api_prefix)
 app.include_router(alert_config_router, prefix=settings.api_prefix)
 app.include_router(entitlements_router, prefix=settings.api_prefix)
 app.include_router(staff_lifecycle_router, prefix=settings.api_prefix)
+app.include_router(activities_router, prefix=settings.api_prefix)
