@@ -9,6 +9,7 @@ import uuid
 from src.application.classes import services as classes_svc
 
 SIGNIN = "/api/v1/auth/student/sign-in"
+ROSTER = "/api/v1/auth/student/roster"
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -180,6 +181,96 @@ def test_persistent_qr_serves_the_whole_class(
     access = _issue(db, klass)
     assert client.post(SIGNIN, json={"qr_token": access.qr_token, "student_id": str(amy.id)}).status_code == 200
     assert client.post(SIGNIN, json={"qr_token": access.qr_token, "student_id": str(ben.id)}).status_code == 200
+
+
+# ---- roster picker (SC-021 real name/avatar list, not a fixture) -----------------------------
+
+def test_roster_by_school_code_returns_real_students(client, make_school, make_student):
+    school = make_school(code="OAK-77")
+    amy = make_student(school, name="Amy")
+    ben = make_student(school, name="Ben")
+    r = client.get(ROSTER, params={"school_or_class_code": "OAK-77"})
+    assert r.status_code == 200
+    names = {s["display_name"] for s in r.json()["students"]}
+    ids = {s["id"] for s in r.json()["students"]}
+    assert names == {"Amy", "Ben"}
+    assert ids == {str(amy.id), str(ben.id)}
+
+
+def test_roster_by_class_join_code_scopes_to_the_class(
+    client, db, make_school, make_student, make_class, add_to_class
+):
+    school = make_school(code="OAK-77")
+    member = make_student(school, name="Amy")
+    make_student(school, name="Ben")  # same school, NOT in this class — must not appear
+    klass = make_class(school)
+    add_to_class(klass, member)
+    access = _issue(db, klass)
+    r = client.get(ROSTER, params={"school_or_class_code": access.join_code})
+    assert r.status_code == 200
+    names = {s["display_name"] for s in r.json()["students"]}
+    assert names == {"Amy"}  # the outsider is NOT in this class's roster
+
+
+def test_roster_excludes_inactive_students(client, db, make_school, make_student):
+    from src.constants.enums import StudentStatus
+
+    school = make_school(code="OAK-77")
+    make_student(school, name="Amy")
+    left = make_student(school, name="Ben")
+    left.status = StudentStatus.inactive
+    db.commit()
+    r = client.get(ROSTER, params={"school_or_class_code": "OAK-77"})
+    assert r.status_code == 200
+    names = {s["display_name"] for s in r.json()["students"]}
+    assert names == {"Amy"}
+
+
+def test_roster_invalid_code_refused_400(client):
+    r = client.get(ROSTER, params={"school_or_class_code": "NOPE"})
+    assert r.status_code == 400
+
+
+def test_roster_by_qr_token_scopes_to_the_class(
+    client, db, make_school, make_student, make_class, add_to_class
+):
+    school = make_school(code="OAK-77")
+    member = make_student(school, name="Amy")
+    make_student(school, name="Ben")  # same school, NOT in this class
+    klass = make_class(school)
+    add_to_class(klass, member)
+    access = _issue(db, klass)
+    r = client.get(ROSTER, params={"qr_token": access.qr_token})
+    assert r.status_code == 200
+    names = {s["display_name"] for s in r.json()["students"]}
+    assert names == {"Amy"}
+
+
+def test_roster_neither_code_nor_qr_refused_400(client):
+    r = client.get(ROSTER)
+    assert r.status_code == 400
+
+
+def test_roster_code_and_qr_together_refused_400(client, db, make_school, make_class):
+    school = make_school(code="OAK-77")
+    klass = make_class(school)
+    access = _issue(db, klass)
+    r = client.get(
+        ROSTER, params={"school_or_class_code": access.join_code, "qr_token": access.qr_token}
+    )
+    assert r.status_code == 400
+
+
+def test_roster_matches_what_sign_in_will_accept(client, make_school, make_student):
+    # The picker and sign-in resolve the SAME code the SAME way — a student returned by the
+    # roster is guaranteed to be a valid sign-in target for that same code.
+    school = make_school(code="OAK-77")
+    student = make_student(school, name="Amy")
+    roster = client.get(ROSTER, params={"school_or_class_code": "OAK-77"}).json()["students"]
+    picked_id = roster[0]["id"]
+    assert picked_id == str(student.id)
+    r = client.post(SIGNIN, json={"school_or_class_code": "OAK-77", "student_id": picked_id})
+    assert r.status_code == 200
 
 
 # ---- single-active-device (INFRA-01 / FR-01-08) ----------------------------------------------

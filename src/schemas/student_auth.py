@@ -23,3 +23,14 @@ class StudentSession(BaseModel):
     session_token: str
     student_id: uuid.UUID
     age_band: str
+
+
+class RosterEntryOut(BaseModel):
+    """One pickable name on the SC-021 name/avatar screen — real roster data, not a fixture."""
+
+    id: uuid.UUID
+    display_name: str
+
+
+class RosterListOut(BaseModel):
+    students: list[RosterEntryOut]

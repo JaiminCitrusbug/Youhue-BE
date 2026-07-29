@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from config.env_config import settings
 from src.application.auth import lockout, sessions
-from src.constants.enums import SessionKind
+from src.constants.enums import SessionKind, StudentStatus
 from src.domain.auth import services as auth_db
 from src.domain.identity import services as identity_db
 from src.domain.identity.models import Student
@@ -116,24 +116,66 @@ def _issue(
     )
 
 
-def _sign_in_by_code(
-    db: Session, code: str, student_id: uuid.UUID, device_id: str | None
-) -> StudentSession:
-    # A per-class join code narrows to one class; a school code admits any student in the school.
+def _resolve_code(db: Session, code: str) -> tuple[uuid.UUID | None, uuid.UUID]:
+    """Shared code resolution for both sign-in and the roster picker: a per-class join code
+    narrows to one class; a school code admits any student in the school. Returns
+    (class_id_or_None, school_id). Raises 400 on an unresolvable code — the SAME check both
+    callers must pass, so the roster picker can never see further than sign-in itself already
+    trusts (the code is this flow's one shared credential either way)."""
     klass = org_db.get_class_by_join_code(db, code)
     if klass is not None:
-        student = identity_db.get_active_student_in_school(db, student_id, klass.school_id)
-        if student is None or not org_db.student_in_class(db, student.id, klass.id):
-            raise _NOT_IN_CLASS
-        return _issue(db, student, qr_token=None, device_id=device_id)
-
+        return klass.id, klass.school_id
     school = identity_db.get_active_school_by_code(db, code)
     if school is None:
         raise _BAD_CODE
-    student = identity_db.get_active_student_in_school(db, student_id, school.id)
+    return None, school.id
+
+
+def _sign_in_by_code(
+    db: Session, code: str, student_id: uuid.UUID, device_id: str | None
+) -> StudentSession:
+    class_id, school_id = _resolve_code(db, code)
+    if class_id is not None:
+        student = identity_db.get_active_student_in_school(db, student_id, school_id)
+        if student is None or not org_db.student_in_class(db, student.id, class_id):
+            raise _NOT_IN_CLASS
+        return _issue(db, student, qr_token=None, device_id=device_id)
+
+    student = identity_db.get_active_student_in_school(db, student_id, school_id)
     if student is None:
         raise _NOT_IN_CLASS
     return _issue(db, student, qr_token=None, device_id=device_id)
+
+
+def list_roster_for_code(
+    db: Session, *, school_or_class_code: str | None = None, qr_token: str | None = None
+) -> list[Student]:
+    """The real name/avatar list for the picker screen (SC-021), scoped identically to sign-in
+    itself: a class code/QR -> that class's roster; a school code -> the whole school's roster.
+    Active students only (a deactivated/left student should not appear as pickable). This does
+    NOT widen what the code/token already discloses — presenting either already lets a caller
+    ATTEMPT sign-in as any student in this same scope (`_sign_in_by_code`/`_sign_in_by_qr` above),
+    so returning their names is not a larger disclosure than the existing trust model accepts.
+    Mutually exclusive, same as sign-in itself."""
+    if bool(school_or_class_code) == bool(qr_token):
+        raise _BAD_CODE
+    class_id: uuid.UUID | None
+    school_id: uuid.UUID
+    if qr_token:
+        klass = org_db.get_class_by_qr_token(db, qr_token)
+        if klass is None:
+            raise _BAD_CODE
+        class_id, school_id = klass.id, klass.school_id
+    elif school_or_class_code:
+        class_id, school_id = _resolve_code(db, school_or_class_code)
+    else:  # pragma: no cover  (unreachable: exclusivity guard above ensures one input)
+        raise _BAD_CODE
+    students = (
+        org_db.list_students_in_class(db, class_id)
+        if class_id is not None
+        else identity_db.list_students_in_school(db, school_id)
+    )
+    return [s for s in students if s.status == StudentStatus.active]
 
 
 def _sign_in_by_qr(
