@@ -19,13 +19,20 @@ import uuid
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 
 from src.application.billing import services as billing_svc
+from src.application.compliance import deletion_services as deletion_svc
 from src.application.compliance import export_services as export_svc
 from src.application.roster import services as roster_svc
 from src.application.schools import services as schools_svc
 from src.infrastructure import storage
 from src.infrastructure.middlewares.auth_middleware import DbDep, StaffDep
 from src.infrastructure.middlewares.ratelimit import rate_limit_registration
-from src.schemas.compliance import ExportAccepted, ExportRequest, ExportStatusOut
+from src.schemas.compliance import (
+    ExportAccepted,
+    ExportAndDeleteConflictResponse,
+    ExportAndDeleteOut,
+    ExportRequest,
+    ExportStatusOut,
+)
 from src.schemas.roster import (
     RosterErrorResponse,
     RosterImportResponse,
@@ -397,3 +404,48 @@ def get_export(
         export_id=export.id, kind=export.kind, status=export.status, created_at=export.created_at,
         download_url=download_url,
     )
+
+
+# --- FR-20-02: school exit — offer a full export first, then hard-delete (SC-065) ---------------
+
+
+@router.post(
+    "/{school_id}/export-and-delete",
+    response_model=ExportAndDeleteOut,
+    responses={
+        status.HTTP_403_FORBIDDEN: {
+            "description": "Caller is not authorised leadership, or a different school."
+        },
+        status.HTTP_409_CONFLICT: {
+            "model": ExportAndDeleteConflictResponse,
+            "description": "The full export has not been provided yet — deletion is refused "
+            "until it is ready.",
+        },
+        status.HTTP_500_INTERNAL_SERVER_ERROR: {
+            "model": ErrorResponse,
+            "description": "The exit flow failed; nothing was written.",
+        },
+    },
+)
+def export_and_delete_school(
+    school_id: uuid.UUID, staff: StaffDep, db: DbDep, background_tasks: BackgroundTasks,
+) -> ExportAndDeleteOut:
+    """FR-20-02 (SC-065) — school exit: offer a full export first, then hard-delete the school's
+    data once (and only once) that export is ready. The SAME endpoint is called across both steps
+    — see `src.application.compliance.deletion_services` for the full state machine. Leadership,
+    own school only (GATE-12-style: role checked before school scope)."""
+    try:
+        export, deleted, needs_build = deletion_svc.request_export_and_delete(db, staff, school_id)
+    except HTTPException:
+        db.rollback()  # no partial write survives a forbidden/rejected export-and-delete call
+        raise
+    except Exception as exc:  # noqa: BLE001 - last-resort guard: never leak a partial write
+        db.rollback()
+        logger.exception("fr_20_02_error action=export_and_delete")
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "The exit flow failed"
+        ) from exc
+    db.commit()
+    if needs_build:
+        background_tasks.add_task(export_svc.build_and_store_export, export.id)
+    return ExportAndDeleteOut(export_id=export.id, status=export.status, deleted=deleted)

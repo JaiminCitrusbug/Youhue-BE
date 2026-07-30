@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String, Uuid, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, String, Uuid, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from config.db_connection import Base
@@ -28,6 +28,21 @@ class ParentalConsent(Base):
 
 class DataExport(Base):
     __tablename__ = "data_exports"
+    __table_args__ = (
+        # FR-20-02 (SC-065): at most ONE export_and_delete-kind row per school, ever — the school
+        # exit flow's own DB-level idempotency/race backstop (BR-05), the same partial-unique-index
+        # shape as uq_flags_open_student_type (FR-12-03) / uq_concern_word_lists_default (FR-19-05).
+        # Two concurrent "start the exit" calls for the same school must not both insert a fresh
+        # row — that would let two callers each believe THEY are driving a single-shot, irreversible
+        # delete. Plain `export`-kind rows (FR-20-01) are unrestricted — a school may request as
+        # many routine exports as it likes.
+        Index(
+            "uq_data_exports_school_export_and_delete",
+            "school_id",
+            unique=True,
+            postgresql_where=text("kind = 'export_and_delete'"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     school_id: Mapped[uuid.UUID] = mapped_column(
