@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from config.db_connection import SessionLocal
+from config import db_connection
 from src.application.authz import services as authz
 from src.constants.enums import DataExportKind, StaffRole
 from src.domain.checkin import services as checkin_db
@@ -114,8 +114,14 @@ def build_and_store_export(export_id: uuid.UUID) -> None:
     """The BackgroundTasks entrypoint — runs AFTER the 202 response is sent, in its own session
     (the request's session is closed by then). A failure here leaves the row `pending` forever
     rather than silently vanishing — surfaced via logging (CRITICAL); a stuck `pending` row is
-    visible to a status poll, never a false `ready`."""
-    db = SessionLocal()
+    visible to a status poll, never a false `ready`.
+
+    Reads `db_connection.SessionLocal` via module attribute (not a frozen import) so tests can
+    monkeypatch it to the isolated test engine — this background task can't go through the usual
+    `get_db`/`app.dependency_overrides` FastAPI DI path (the request that would carry that override
+    has already finished), so it needs its own escape hatch (see
+    `tests/test_data_export.py::_background_task_uses_test_db`)."""
+    db = db_connection.SessionLocal()
     try:
         export = compliance_db.get_export(db, export_id)
         if export is None:  # pragma: no cover - defensive; the row was just created by the caller

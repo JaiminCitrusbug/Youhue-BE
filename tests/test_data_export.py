@@ -28,6 +28,24 @@ from src.infrastructure import storage
 STAFF_SIGNIN = "/api/v1/auth/staff/sign-in"
 
 
+@pytest.fixture(autouse=True)
+def _background_task_uses_test_db(monkeypatch):
+    """`build_and_store_export` runs via FastAPI `BackgroundTasks` AFTER the response is sent — by
+    then the request's own `db` session is closed, so it opens a NEW one via
+    `config.db_connection.SessionLocal`. That factory is bound to `settings.database_url` (the
+    dev/prod URL), not `database_url_test` — outside this patch, the background task silently talks
+    to a DIFFERENT database than the rest of the test (wrong data, and can drift out of migration
+    sync with it, as this ticket's own build found live: `youhue-local` lacked the `storage_key`
+    column this ticket's migration adds). Patch it to the SAME test engine/session factory
+    `conftest.py`'s `db` fixture uses, for the duration of this file's tests only — a narrower fix
+    than changing the shared `conftest.py` override, since only this ticket's background-task
+    pattern needs it (every other fire-and-forget hook in this codebase reuses the request's own
+    `db` session instead of opening a new one)."""
+    from tests.conftest import _TestSession
+
+    monkeypatch.setattr("config.db_connection.SessionLocal", _TestSession)
+
+
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
