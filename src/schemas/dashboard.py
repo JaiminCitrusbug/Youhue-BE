@@ -16,6 +16,12 @@ class ClassDashboardOut(BaseModel):
     live: bool
     period: str
     timezone: str
+    # FR-10-05: distinguishes "this class has never checked in" from "this filter matched nothing
+    # even though the class has data elsewhere" — the two must never share copy (ticket §Must-nots).
+    # has_data      -> mood_index is populated (real check-ins in the current window).
+    # no_data_yet   -> the class has NEVER had a check-in, in any period.
+    # no_results    -> the current window is empty, but the class DOES have check-ins outside it.
+    data_state: Literal["has_data", "no_data_yet", "no_results"]
 
 
 class ClassRosterRow(BaseModel):

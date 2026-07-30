@@ -10,12 +10,16 @@ of in-window `CheckIn.mood_value`, config-scaled) is deliberately simple and ent
 config-driven (`settings.dashboard_mood_index_scale`), matching this codebase's established
 placeholder-pending-ratification posture (`default_concern_words`, the FR-04-01 mood set) — never
 hard-coded as if it were a ratified product decision.
+
+FR-10-05 adds `data_state` (`has_data|no_data_yet|no_results`) to the SAME response — presentation
+state over this existing contract, not a new endpoint or figure. See `get_class_dashboard`'s
+`data_state` block below for the no_data_yet-vs-no_results distinction.
 """
 import logging
 import statistics
 import uuid
 from datetime import UTC, date, datetime
-from typing import cast
+from typing import Literal, cast
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
@@ -98,6 +102,10 @@ def get_class_dashboard(
             "fr_10_03_forbidden action=get_dashboard actor_id=%s class_id=%s",
             staff.id, class_id,
         )
+        logger.warning(
+            "fr_10_05_forbidden action=get_dashboard actor_id=%s class_id=%s",
+            staff.id, class_id,
+        )
         raise
     # `require_class_access` above already guarantees a real, accessible class row exists.
     klass = cast(ClassGroup, org_db.get_class(db, class_id))
@@ -107,6 +115,10 @@ def get_class_dashboard(
     except HTTPException:
         logger.info(
             "fr_10_03_rejected action=get_dashboard actor_id=%s class_id=%s "
+            "reason=invalid_range range=%s", staff.id, class_id, range_param,
+        )
+        logger.info(
+            "fr_10_05_rejected action=get_dashboard actor_id=%s class_id=%s "
             "reason=invalid_range range=%s", staff.id, class_id, range_param,
         )
         raise
@@ -129,6 +141,18 @@ def get_class_dashboard(
     prior_index = derived.compute("class.mood_index", [c.mood_value for c in prior_checkins])
     trend = derived.compute("class.trend", current_index, prior_index)
 
+    # FR-10-05: `no_data_yet` (this class has NEVER checked in) vs `no_results` (this window is
+    # empty but the class HAS check-ins elsewhere) — an ALL-TIME existence probe, deliberately not
+    # window-scoped, is the only way to tell the two apart (ticket §Must-nots: "not interchangeable
+    # copy"). Only run when the current window is actually empty — `has_data` never needs it.
+    data_state: Literal["has_data", "no_data_yet", "no_results"]
+    if current_index is not None:
+        data_state = "has_data"
+    elif checkin_db.has_any_checkins_for_students(db, student_ids):
+        data_state = "no_results"
+    else:
+        data_state = "no_data_yet"
+
     logger.info(
         "fr_10_01_success action=get_dashboard actor_id=%s class_id=%s mood_index=%s trend=%s "
         "period=%s", staff.id, class_id, current_index, trend, period_key,
@@ -136,6 +160,10 @@ def get_class_dashboard(
     logger.info(
         "fr_10_03_success action=get_dashboard actor_id=%s class_id=%s range=%s period=%s",
         staff.id, class_id, range_param, period_key,
+    )
+    logger.info(
+        "fr_10_05_success action=get_dashboard actor_id=%s class_id=%s data_state=%s",
+        staff.id, class_id, data_state,
     )
     return ClassDashboardOut(
         class_id=str(class_id),
@@ -146,6 +174,7 @@ def get_class_dashboard(
         live=True,  # the dashboard always computes on-demand, never from a stale cache
         period=period_key,
         timezone=config.timezone if config is not None else "UTC",
+        data_state=data_state,
     )
 
 

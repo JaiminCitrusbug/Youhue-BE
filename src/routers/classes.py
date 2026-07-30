@@ -51,6 +51,12 @@ def get_class_dashboard(
         logger.exception(
             "fr_10_03_error action=get_dashboard actor_id=%s class_id=%s", staff.id, class_id
         )
+        # FR-10-05: a 500 here MUST still render as an error state, never a crash — this handler is
+        # what makes that true (translates any unhandled exception to a real HTTPException the FE
+        # can render a banner from, instead of letting it propagate as a raw 500 with no body).
+        logger.error(
+            "fr_10_05_error action=get_dashboard actor_id=%s class_id=%s", staff.id, class_id
+        )
         raise HTTPException(
             status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not load the dashboard"
         ) from exc

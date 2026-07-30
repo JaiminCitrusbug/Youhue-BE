@@ -15,6 +15,14 @@ Every ticket Must-not has a test that fails if the guarantee is removed:
         -> test_dashboard_no_checkins_returns_null_index_and_flat_trend
   MN-5  A shared-scope teacher (not just the owner) can read the dashboard.
         -> test_dashboard_readable_by_shared_scope_teacher_not_only_owner
+  MN-6  (FR-10-05) `data_state` distinguishes `no_data_yet` (class NEVER checked in) from
+        `no_results` (this window is empty but the class HAS check-ins elsewhere) — never
+        interchangeable copy; a 500 renders as an error state, never a crash.
+        -> test_dashboard_never_checked_in_returns_no_data_yet
+        -> test_dashboard_filter_matches_nothing_though_data_exists_returns_no_results
+        -> test_dashboard_data_state_is_has_data_when_mood_index_present
+        -> test_dashboard_unexpected_error_renders_500_never_a_crash
+        -> test_fr_10_05_success_rejected_forbidden_error_are_logged
 """
 from datetime import date, datetime
 
@@ -22,7 +30,9 @@ import pytest
 
 from config.env_config import settings
 from src.application.auth import sessions
+from src.application.dashboard import services as dashboard_svc
 from src.constants.enums import SchoolStatus, SessionKind, StaffClassScope, StaffRole
+from src.domain.checkin import services as checkin_db
 from src.domain.checkin.models import CheckIn
 from src.domain.identity.models import StaffAccount
 from src.domain.org.models import CalendarConfig
@@ -123,6 +133,7 @@ def test_dashboard_returns_mood_index_and_trend_matching_an_independent_recomput
     expected_index = round((sum(current_moods) / len(current_moods)) * settings.dashboard_mood_index_scale, 2)
     assert body["mood_index"] == expected_index == 8.0
     assert body["trend"] == "up"  # 8.0 > prior week's 2.0
+    assert body["data_state"] == "has_data"  # FR-10-05: a populated mood_index is always has_data
 
 
 def test_trend_reports_up_and_down_directionally(
@@ -208,7 +219,7 @@ def test_dashboard_no_checkins_returns_null_index_and_flat_trend(
     klass = make_class(school, name="Empty")
     grant_class_access(teacher, klass, scope=StaffClassScope.owner)
     student = make_student(school, name="Dee")
-    add_to_class(klass, student)  # a real student, but zero check-ins this or last week
+    add_to_class(klass, student)  # a real student, but zero check-ins this or last week, EVER
     token = _mint(db, teacher)
 
     r = client.get(DASH.format(id=klass.id), headers=_auth(token))
@@ -216,6 +227,8 @@ def test_dashboard_no_checkins_returns_null_index_and_flat_trend(
     body = r.json()
     assert body["mood_index"] is None
     assert body["trend"] == "flat"
+    # FR-10-05 Scenario 1: never having checked in at all is `no_data_yet`, not `no_results`.
+    assert body["data_state"] == "no_data_yet"
 
 
 def test_dashboard_readable_by_shared_scope_teacher_not_only_owner(
@@ -415,3 +428,147 @@ def test_changing_the_filter_refetches_never_recomputes_client_side(
     assert week["mood_index"] == round(5 * settings.dashboard_mood_index_scale, 2)
     assert month["mood_index"] == round(((5 + 1) / 2) * settings.dashboard_mood_index_scale, 2)
     assert week["mood_index"] != month["mood_index"]
+
+
+# =================================================================================================
+# FR-10-05 — data_state (has_data|no_data_yet|no_results) + 500-never-a-crash + structured logs
+# =================================================================================================
+
+
+def test_dashboard_never_checked_in_returns_no_data_yet(
+    client, db, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class,
+):
+    """Scenario 1 (ticket, verbatim): a class with NO check-ins anywhere, for any period."""
+    school = make_school(code="S-1", status=SchoolStatus.active, name="Dash S-1")
+    _set_config(db, school)
+    teacher = make_staff(school, email="t-s1@school.edu", role=StaffRole.teacher)
+    klass = make_class(school, name="3A")
+    grant_class_access(teacher, klass, scope=StaffClassScope.owner)
+    student = make_student(school, name="Amy")
+    add_to_class(klass, student)  # never checked in, ever
+    token = _mint(db, teacher)
+
+    r = client.get(DASH.format(id=klass.id), headers=_auth(token))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mood_index"] is None
+    assert body["data_state"] == "no_data_yet"
+
+
+def test_dashboard_filter_matches_nothing_though_data_exists_returns_no_results(
+    client, db, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class,
+):
+    """Scenario 2 (ticket, verbatim): a filter that matches no check-ins although data EXISTS —
+    the check-in here is real, just outside `this_week` (the default/current window)."""
+    school = make_school(code="S-2", status=SchoolStatus.active, name="Dash S-2")
+    _set_config(db, school)
+    teacher = make_staff(school, email="t-s2@school.edu", role=StaffRole.teacher)
+    klass = make_class(school, name="3A")
+    grant_class_access(teacher, klass, scope=StaffClassScope.owner)
+    student = make_student(school, name="Amy")
+    add_to_class(klass, student)
+    _checkin(db, student, school, mood=4, at=datetime(2026, 7, 3, 9, 0))  # inside July, outside this_week
+    token = _mint(db, teacher)
+
+    r = client.get(DASH.format(id=klass.id), headers=_auth(token))  # default range = this_week
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mood_index"] is None
+    assert body["data_state"] == "no_results"  # distinct from no_data_yet — data exists, just not here
+
+
+def test_dashboard_data_state_is_has_data_when_mood_index_present(
+    client, db, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class,
+):
+    school, _teacher, klass, token = _setup_class_with_checkins(
+        db, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class,
+        code="S-3",
+    )
+    r = client.get(DASH.format(id=klass.id), headers=_auth(token))
+    assert r.status_code == 200
+    assert r.json()["data_state"] == "has_data"
+
+
+def test_dashboard_unexpected_error_renders_500_never_a_crash(
+    client, db, make_school, make_staff, make_class, grant_class_access, monkeypatch,
+):
+    """Ticket §Must-nots: 'a server error (500) is rendered as an error state, never a crash, and
+    is never silently dropped' — a genuinely unexpected exception deep in the read path still comes
+    back as a real HTTP 500 response (TestClient would instead raise the exception if it were left
+    unhandled), never a raw traceback leaked to the client."""
+    school = make_school(code="S-4", status=SchoolStatus.active, name="Dash S-4")
+    _set_config(db, school)
+    teacher = make_staff(school, email="t-s4@school.edu", role=StaffRole.teacher)
+    klass = make_class(school, name="3A")
+    grant_class_access(teacher, klass, scope=StaffClassScope.owner)
+    token = _mint(db, teacher)
+
+    def _boom(*_a: object, **_k: object) -> list[CheckIn]:
+        raise RuntimeError("db went away")
+
+    monkeypatch.setattr(checkin_db, "list_checkins_for_students_between", _boom)
+
+    r = client.get(DASH.format(id=klass.id), headers=_auth(token))
+    assert r.status_code == 500
+    assert r.json()["detail"] == "Could not load the dashboard"  # never a raw stack trace
+
+
+def test_fr_10_05_success_rejected_forbidden_error_are_logged(
+    client, db, make_school, make_staff, make_student, make_class, grant_class_access, add_to_class,
+    monkeypatch,
+):
+    """Ticket DoD (verbatim): 'Logs emit fr_10_05_success / _rejected / _forbidden / _error.'
+    `caplog` cannot be used in this suite (documented pre-existing quirk — `alembic/env.py`'s
+    `logging.config.fileConfig` disables every `youhue.*` logger at collection time; see
+    tests/test_roster.py:296-302) — monkeypatch the logger methods directly instead, same
+    established workaround as test_roster.py/test_roster_reconcile.py."""
+    school = make_school(code="S-5", status=SchoolStatus.active, name="Dash S-5")
+    _set_config(db, school)
+    teacher = make_staff(school, email="t-s5@school.edu", role=StaffRole.teacher)
+    other_teacher = make_staff(school, email="other-s5@school.edu", role=StaffRole.teacher)
+    klass = make_class(school, name="3A")
+    grant_class_access(teacher, klass, scope=StaffClassScope.owner)
+    student = make_student(school, name="Amy")
+    add_to_class(klass, student)
+    token = _mint(db, teacher)
+    other_token = _mint(db, other_teacher)
+
+    info_calls: list[str] = []
+    warn_calls: list[str] = []
+    error_calls: list[str] = []
+    monkeypatch.setattr(
+        dashboard_svc.logger, "info", lambda msg, *a, **k: info_calls.append(msg % a if a else msg)
+    )
+    monkeypatch.setattr(
+        dashboard_svc.logger, "warning", lambda msg, *a, **k: warn_calls.append(msg % a if a else msg)
+    )
+    monkeypatch.setattr(
+        dashboard_svc.logger, "error", lambda msg, *a, **k: error_calls.append(msg % a if a else msg)
+    )
+
+    # success
+    r = client.get(DASH.format(id=klass.id), headers=_auth(token))
+    assert r.status_code == 200
+    assert any("fr_10_05_success" in c for c in info_calls)
+
+    # rejected (422 — invalid range)
+    r = client.get(DASH.format(id=klass.id) + "?range=nonsense", headers=_auth(token))
+    assert r.status_code == 422
+    assert any("fr_10_05_rejected" in c for c in info_calls)
+
+    # forbidden (403 — not this teacher's class)
+    r = client.get(DASH.format(id=klass.id), headers=_auth(other_token))
+    assert r.status_code == 403
+    assert any("fr_10_05_forbidden" in c for c in warn_calls)
+
+    # error (500 — unexpected exception). `dashboard_svc.logger` and the router's `logger` are the
+    # SAME `logging.getLogger("youhue.dashboard")` singleton, so patching this one attribute covers
+    # the router's `logger.error("fr_10_05_error"...)` call too.
+    monkeypatch.setattr(
+        dashboard_svc,
+        "get_class_dashboard",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    r = client.get(DASH.format(id=klass.id), headers=_auth(token))
+    assert r.status_code == 500
+    assert any("fr_10_05_error" in c for c in error_calls)

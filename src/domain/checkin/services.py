@@ -164,6 +164,20 @@ def list_checkins_for_students_between(
     )
 
 
+def has_any_checkins_for_students(db: Session, student_ids: list[uuid.UUID]) -> bool:
+    """FR-10-05 — an ALL-TIME existence check (never window-scoped), needed to tell the dashboard's
+    `no_data_yet` (this class has NEVER had a check-in) apart from `no_results` (the currently
+    selected window has none, but the class DOES have check-ins outside it) — a distinction
+    `list_checkins_for_students_between` above cannot answer on its own since it is always bounded
+    to one window. `LIMIT 1` existence probe, never fetches full rows."""
+    if not student_ids:
+        return False
+    return (
+        db.scalar(select(CheckIn.id).where(CheckIn.student_id.in_(student_ids)).limit(1))
+        is not None
+    )
+
+
 def get_unscored_for_update(db: Session) -> list[CheckIn]:
     return list(
         db.scalars(select(CheckIn).where(CheckIn.scored.is_(False)).with_for_update(skip_locked=True))
