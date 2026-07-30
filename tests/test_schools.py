@@ -150,7 +150,10 @@ def test_pending_school_session_cannot_reach_a_staff_write_endpoint(
     allowed = client.post(
         NOTIFY,
         headers=_auth(_mint_staff_session(db, live_staff)),
-        json={"recipient_id": str(live_staff.id), "type": "alert", "payload": {}},
+        # "alert" types require a `reason` (FR-18-01, never a bare notice) — this control call is
+        # only proving the school-status gate, so it satisfies that separate rule rather than
+        # switching to a non-alert type and weakening what it exercises.
+        json={"recipient_id": str(live_staff.id), "type": "alert", "payload": {"reason": "test"}},
     )
     assert allowed.status_code == 202
 
