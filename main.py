@@ -25,6 +25,7 @@ from src.routers.staff_auth import router as staff_auth_router
 from src.routers.staff_lifecycle import router as staff_lifecycle_router
 from src.routers.student_auth import router as student_auth_router
 from src.routers.students import router as students_router
+from src.routers.subscriptions import router as subscriptions_router
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
 app.include_router(health_router)
@@ -46,3 +47,4 @@ app.include_router(alert_config_router, prefix=settings.api_prefix)
 app.include_router(entitlements_router, prefix=settings.api_prefix)
 app.include_router(staff_lifecycle_router, prefix=settings.api_prefix)
 app.include_router(activities_router, prefix=settings.api_prefix)
+app.include_router(subscriptions_router, prefix=settings.api_prefix)

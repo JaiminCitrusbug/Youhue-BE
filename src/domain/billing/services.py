@@ -190,3 +190,17 @@ def get_or_create_subscription(db: Session, school_id: uuid.UUID) -> Subscriptio
     if sub is None:  # pragma: no cover - the upsert above guarantees a row exists by now
         raise RuntimeError(f"subscription upsert invariant violated for school_id={school_id}")
     return sub
+
+
+def get_subscription_locked(db: Session, subscription_id: uuid.UUID) -> Subscription | None:
+    """FR-17-04 — lock an EXISTING Subscription row by its OWN id (`SELECT ... FOR UPDATE`) for a
+    state-transition write (downgrade / cancel). Unlike `get_or_create_subscription`, this never
+    creates a row: a downgrade/cancel of a school with no Subscription row at all has nothing
+    eligible to transition, so the caller treats `None` the same as an ineligible subscription
+    (409), not a lazy-create. The lock serializes this write against any concurrent writer of the
+    SAME row (`extend_trial`, `start_trial_via_endpoint`, another downgrade/cancel retry) — same
+    race-safety pattern `get_or_create_subscription`'s docstring already established for this
+    table, just for the update-only (not upsert) path."""
+    return db.scalar(
+        select(Subscription).where(Subscription.id == subscription_id).with_for_update()
+    )
