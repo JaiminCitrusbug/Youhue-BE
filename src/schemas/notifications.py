@@ -28,4 +28,11 @@ class NotificationOut(BaseModel):
     type: str
     payload: dict[str, Any] | None = None
     created_at: datetime
+    # FR-18-01 (SC-054 notifications centre): null = unread. Set once by mark-all-read; the FE
+    # derives the unread dot / count from this, never a separate invented flag.
+    read_at: datetime | None = None
     deliveries: list[DeliveryOut]
+
+
+class MarkAllReadOut(BaseModel):
+    marked: int

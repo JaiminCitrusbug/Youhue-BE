@@ -52,3 +52,6 @@ class Notification(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # FR-18-01 (SC-054 notifications centre): null = unread; set by mark-all-read. Per-notification
+    # (not per-channel) — the in-app "read" concept is distinct from AlertDelivery's send lifecycle.
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

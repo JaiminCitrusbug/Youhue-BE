@@ -10,7 +10,13 @@ from fastapi import APIRouter, Header, HTTPException, status
 from config.env_config import settings
 from src.application.notifications import services as notif
 from src.infrastructure.middlewares.auth_middleware import DbDep, StaffDep
-from src.schemas.notifications import DeliveryCallback, DeliveryOut, EnqueueRequest, NotificationOut
+from src.schemas.notifications import (
+    DeliveryCallback,
+    DeliveryOut,
+    EnqueueRequest,
+    MarkAllReadOut,
+    NotificationOut,
+)
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 logger = logging.getLogger("youhue.notifications")
@@ -18,11 +24,29 @@ logger = logging.getLogger("youhue.notifications")
 
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
 def enqueue_notification(body: EnqueueRequest, staff: StaffDep, db: DbDep) -> dict[str, str]:
-    notification = notif.enqueue_to_school(
-        db, staff.school_id, body.recipient_id, body.type, body.payload
-    )
+    try:
+        notification = notif.enqueue_to_school(
+            db, staff.school_id, body.recipient_id, body.type, body.payload
+        )
+    except HTTPException:
+        db.rollback()  # 403 (out-of-school) / 422 (missing context) — never a partial write
+        raise
+    except Exception as exc:  # noqa: BLE001 - last-resort guard: never leak a partial write
+        db.rollback()
+        logger.exception("fr_18_01_error")
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Notification enqueue failed"
+        ) from exc
     db.commit()
     return {"status": "accepted", "notification_id": str(notification.id)}
+
+
+@router.post("/mark-all-read", response_model=MarkAllReadOut)
+def mark_all_read(staff: StaffDep, db: DbDep) -> MarkAllReadOut:
+    # FR-18-01 (SC-054): self-scoped only — `staff.id` is always the authenticated caller's own id.
+    marked = notif.mark_all_read(db, staff.id)
+    db.commit()
+    return MarkAllReadOut(marked=marked)
 
 
 @router.post("/{notification_id}/delivery")
@@ -54,6 +78,7 @@ def list_feed(staff: StaffDep, db: DbDep) -> list[NotificationOut]:
             type=n.type,
             payload=n.payload,
             created_at=n.created_at,
+            read_at=n.read_at,
             deliveries=[
                 DeliveryOut(channel=d.channel.value, status=d.status.value) for d in deliveries
             ],

@@ -33,7 +33,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -135,6 +135,18 @@ def deliveries_for_recipient(db: Session, recipient_id: uuid.UUID) -> list[Alert
             select(AlertDelivery).where(AlertDelivery.recipient_id == recipient_id)
         )
     )
+
+
+def mark_all_read(db: Session, recipient_id: uuid.UUID) -> int:
+    """FR-18-01 (SC-054): bulk-mark every unread notification (read_at IS NULL) for this recipient
+    as read, in ONE statement (ACID; no read-then-write race across concurrent tabs). Scoped to the
+    recipient's own rows only — never widens to another staff member's notifications."""
+    result = db.execute(
+        update(Notification)
+        .where(Notification.recipient_id == recipient_id, Notification.read_at.is_(None))
+        .values(read_at=func.now())
+    )
+    return result.rowcount or 0
 
 
 def persist(db: Session) -> None:

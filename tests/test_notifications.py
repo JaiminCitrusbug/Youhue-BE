@@ -209,6 +209,159 @@ def test_delivery_webhook_requires_secret(client, db, make_school, make_staff, m
     assert ok.status_code == 200
 
 
+# --- FR-18-01 (SC-054 notifications centre): required context, mark-all-read, structured logs ----
+
+def test_alert_notification_missing_context_is_rejected_422(client, make_school, make_staff):
+    school = make_school()
+    staff = make_staff(school, email="ctx1@oakwood.edu")
+    token = _token(client, "ctx1@oakwood.edu")
+    r = client.post(
+        "/api/v1/notifications",
+        json={"recipient_id": str(staff.id), "type": "risk_alert"},  # no payload at all
+        headers=_auth(token),
+    )
+    assert r.status_code == 422
+
+
+def test_alert_notification_with_blank_reason_is_rejected_422(client, make_school, make_staff):
+    school = make_school()
+    staff = make_staff(school, email="ctx2@oakwood.edu")
+    token = _token(client, "ctx2@oakwood.edu")
+    r = client.post(
+        "/api/v1/notifications",
+        # payload present but the required context field is missing/blank -> still a bare notice
+        json={"recipient_id": str(staff.id), "type": "risk_alert", "payload": {"band": "immediate"}},
+        headers=_auth(token),
+    )
+    assert r.status_code == 422
+
+
+def test_alert_notification_with_context_is_accepted(client, make_school, make_staff):
+    school = make_school()
+    staff = make_staff(school, email="ctx3@oakwood.edu")
+    token = _token(client, "ctx3@oakwood.edu")
+    r = client.post(
+        "/api/v1/notifications",
+        json={
+            "recipient_id": str(staff.id), "type": "risk_alert",
+            "payload": {"reason": "concern word: hurt", "flag_id": str(uuid.uuid4())},
+        },
+        headers=_auth(token),
+    )
+    assert r.status_code == 202
+
+
+def test_enqueue_rejection_is_logged(client, make_school, make_staff, monkeypatch):
+    school = make_school()
+    staff = make_staff(school, email="ctx4@oakwood.edu")
+    token = _token(client, "ctx4@oakwood.edu")
+    calls: list[str] = []
+    monkeypatch.setattr(notif_mod.logger, "info", lambda msg, *a, **k: calls.append(msg % a if a else msg))
+    r = client.post(
+        "/api/v1/notifications",
+        json={"recipient_id": str(staff.id), "type": "risk_alert"},
+        headers=_auth(token),
+    )
+    assert r.status_code == 422
+    assert any("fr_18_01_rejected" in c for c in calls)
+
+
+def test_enqueue_success_is_logged(client, make_school, make_staff, monkeypatch):
+    school = make_school()
+    staff = make_staff(school, email="ctx5@oakwood.edu")
+    token = _token(client, "ctx5@oakwood.edu")
+    calls: list[str] = []
+    monkeypatch.setattr(notif_mod.logger, "info", lambda msg, *a, **k: calls.append(msg % a if a else msg))
+    r = client.post(
+        "/api/v1/notifications",
+        json={"recipient_id": str(staff.id), "type": "hi"},
+        headers=_auth(token),
+    )
+    assert r.status_code == 202
+    assert any("fr_18_01_success" in c for c in calls)
+
+
+def test_enqueue_forbidden_is_logged(client, make_school, make_staff, monkeypatch):
+    school_a = make_school(code="LOG-A")
+    school_b = make_school(code="LOG-B")
+    make_staff(school_a, email="loga@oakwood.edu")
+    other = make_staff(school_b, email="logb@oakwood.edu")
+    token = _token(client, "loga@oakwood.edu")
+    calls: list[str] = []
+    monkeypatch.setattr(notif_mod.logger, "info", lambda msg, *a, **k: calls.append(msg % a if a else msg))
+    r = client.post(
+        "/api/v1/notifications",
+        json={"recipient_id": str(other.id), "type": "hi"},
+        headers=_auth(token),
+    )
+    assert r.status_code == 403
+    assert any("fr_18_01_forbidden" in c for c in calls)
+
+
+def test_enqueue_error_is_logged(client, make_school, make_staff, monkeypatch):
+    school = make_school()
+    staff = make_staff(school, email="ctx6@oakwood.edu")
+    token = _token(client, "ctx6@oakwood.edu")
+
+    def _boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("db went away")
+
+    # fails AFTER the recipient/context checks pass, mid-write — the router's fr_18_01_error path
+    # is what turns this into a 500 (never a partial write: rolled back, not silently dropped).
+    monkeypatch.setattr(notif_mod.billing_db, "add_notification", _boom)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        notif_mod.logger, "exception", lambda msg, *a, **k: calls.append(msg % a if a else msg)
+    )
+    r = client.post(
+        "/api/v1/notifications",
+        json={"recipient_id": str(staff.id), "type": "hi"},
+        headers=_auth(token),
+    )
+    assert r.status_code == 500
+    assert any("fr_18_01_error" in c for c in calls)
+
+
+def test_mark_all_read_marks_own_unread_notifications(client, db, make_school, make_staff):
+    school = make_school()
+    me = make_staff(school, email="reader@oakwood.edu")
+    n1 = notif.enqueue(db, recipient_id=me.id, ntype="mine1", payload=None)
+    n2 = notif.enqueue(db, recipient_id=me.id, ntype="mine2", payload=None)
+    db.commit()
+    token = _token(client, "reader@oakwood.edu")
+
+    before = client.get("/api/v1/notifications", headers=_auth(token)).json()
+    assert all(n["read_at"] is None for n in before)  # unread by default
+
+    r = client.post("/api/v1/notifications/mark-all-read", headers=_auth(token))
+    assert r.status_code == 200
+    assert r.json()["marked"] == 2
+
+    after = {n["id"]: n["read_at"] for n in client.get("/api/v1/notifications", headers=_auth(token)).json()}
+    assert after[str(n1.id)] is not None
+    assert after[str(n2.id)] is not None
+
+    # idempotent: nothing left unread to mark a second time
+    r2 = client.post("/api/v1/notifications/mark-all-read", headers=_auth(token))
+    assert r2.json()["marked"] == 0
+
+
+def test_mark_all_read_does_not_touch_other_recipients(client, db, make_school, make_staff):
+    school = make_school()
+    me = make_staff(school, email="mine@oakwood.edu")
+    colleague = make_staff(school, email="colleague@oakwood.edu")
+    mine = notif.enqueue(db, recipient_id=me.id, ntype="mine", payload=None)
+    theirs = notif.enqueue(db, recipient_id=colleague.id, ntype="theirs", payload=None)
+    db.commit()
+
+    client.post("/api/v1/notifications/mark-all-read", headers=_auth(_token(client, "mine@oakwood.edu")))
+
+    db.refresh(mine)
+    db.refresh(theirs)
+    assert mine.read_at is not None
+    assert theirs.read_at is None  # a colleague's own feed is never touched
+
+
 def test_worker_entrypoint_run_once(monkeypatch):
     # the runnable worker entrypoint runs ONE pass (its own session, commits, closes) — no loop.
     from src.application.notifications import worker

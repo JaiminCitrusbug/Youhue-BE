@@ -28,6 +28,24 @@ DEFAULT_CHANNELS = (AlertChannel.in_app, AlertChannel.email)
 MAX_ATTEMPTS = 3
 BASE_BACKOFF_SECONDS = 60  # exponential base: retry N waits 60 * 2**(N-1) seconds
 
+# FR-18-01 (SC-054 / must-not: "never a bare notice"): an alert-class notification must carry the
+# context/reason the recipient needs to act. Scoped to alert-class TYPES only — a transactional
+# notice (invite accepted, weekly report ready, ...) has nothing to act on and is not required to
+# carry it, so the pre-existing INFRA-05/FR-18-03 producer contract (payload optional) is unchanged
+# for those.
+REQUIRED_CONTEXT_FIELD = "reason"
+
+
+def _is_alert_type(ntype: str) -> bool:
+    return "alert" in ntype.lower()
+
+
+def _has_required_context(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    value = payload.get(REQUIRED_CONTEXT_FIELD)
+    return isinstance(value, str) and bool(value.strip())
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -191,7 +209,9 @@ def enqueue_to_school(
     ntype: str,
     payload: dict[str, Any] | None,
 ) -> Notification:
-    """Enqueue to an IN-SCHOOL recipient only (403 otherwise). Returns 202 without a blocking send.
+    """Enqueue to an IN-SCHOOL recipient only (403 otherwise); an alert-class notice missing its
+    required context is rejected (422 — never a bare notice, FR-18-01). Returns 202 without a
+    blocking send.
 
     Delivery happens out-of-band via the worker (process_due_deliveries) — the producer is never
     blocked by a slow/failing email provider, and never processes another school's backlog.
@@ -202,10 +222,37 @@ def enqueue_to_school(
             "fr_18_03_forbidden reason=recipient_not_in_school recipient=%s school=%s",
             recipient_id, sender_school_id,
         )
+        logger.info(
+            "fr_18_01_forbidden reason=recipient_not_in_school recipient=%s school=%s",
+            recipient_id, sender_school_id,
+        )
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Recipient not in your school")
+    if _is_alert_type(ntype) and not _has_required_context(payload):
+        logger.info(
+            "fr_18_01_rejected reason=missing_context type=%s recipient=%s", ntype, recipient_id,
+        )
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Notification of type '{ntype}' is missing required context "
+            f"('{REQUIRED_CONTEXT_FIELD}') to act on — never a bare notice",
+        )
     notification = enqueue(db, recipient_id=recipient_id, ntype=ntype, payload=payload)
     logger.info(
         "fr_18_03_success action=enqueued notification=%s recipient=%s",
         notification.id, recipient_id,
     )
+    logger.info(
+        "fr_18_01_success action=enqueued notification=%s recipient=%s",
+        notification.id, recipient_id,
+    )
     return notification
+
+
+def mark_all_read(db: Session, recipient_id: uuid.UUID) -> int:
+    """FR-18-01 (SC-054 notifications centre): mark every unread notification of the caller's own
+    feed as read. Self-scoped only — `recipient_id` is always the authenticated staff member."""
+    marked = billing_db.mark_all_read(db, recipient_id)
+    logger.info(
+        "fr_18_01_success action=mark_all_read recipient=%s marked=%s", recipient_id, marked,
+    )
+    return marked

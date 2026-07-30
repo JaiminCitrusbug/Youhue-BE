@@ -218,6 +218,7 @@ Table notifications {
   type varchar [not null]
   payload jsonb
   created_at timestamptz [not null, default: `now()`]
+  read_at timestamptz [note: 'FR-18-01: null = unread; set by mark-all-read']
   indexes { recipient_id }
 }
 
