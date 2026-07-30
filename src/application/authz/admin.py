@@ -33,6 +33,12 @@ class AdminPermission(str, enum.Enum):
     # capability to be permission-bound (403 for a role that lacks it), never bundled into general
     # account management ("not an open backdoor").
     access_child_data = "access_child_data"
+    # FR-20-05 (SC-080): read the platform-wide audit trail. Granted to BOTH internal roles (unlike
+    # `access_child_data`'s superadmin-only grant) — the audit log carries structural metadata only
+    # (actor/action/target/school_id/timestamp; see `domain/compliance/models.py`), never raw
+    # children's data or free-text reason content, so it does not need the narrowest-grant posture
+    # that capability gets.
+    view_audit_log = "view_audit_log"
 
 
 # The role -> permission matrix. superadmin has every permission; support is a strict subset
@@ -43,7 +49,11 @@ class AdminPermission(str, enum.Enum):
 _ROLE_PERMISSIONS: dict[AdminRole, frozenset[AdminPermission]] = {
     AdminRole.superadmin: frozenset(AdminPermission),
     AdminRole.support: frozenset(
-        {AdminPermission.manage_accounts, AdminPermission.view_statistics}
+        {
+            AdminPermission.manage_accounts,
+            AdminPermission.view_statistics,
+            AdminPermission.view_audit_log,
+        }
     ),
 }
 

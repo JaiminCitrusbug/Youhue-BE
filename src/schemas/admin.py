@@ -173,3 +173,32 @@ class PlatformStatsResponse(BaseModel):
     active_trials: int
     checkin_volume: int
     alert_volume: int
+
+
+# ---- FR-20-05 — audit-log viewer (SC-080) ------------------------------------------------------
+
+
+class AuditLogEntry(BaseModel):
+    """One row of the immutable `audit_logs` table, as read (never written) by this ticket. No
+    `reason` field — the underlying table carries none (see FR-19-02's `support_access`, which
+    deliberately does not persist free-text reason content into the audit row); the approved SC-080
+    screen's own table likewise has only When/Actor/Action columns, no Reason column."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    at: datetime
+    actor_id: uuid.UUID
+    action: str
+    target: str
+    school_id: uuid.UUID | None = None
+
+
+class AuditLogListResponse(BaseModel):
+    """GET /admin/audit-log envelope — the filtered page + the total matching the filter (not
+    just the page size), so the viewer can render "showing N of TOTAL" like SchoolAccounts does."""
+
+    entries: list[AuditLogEntry]
+    total: int
+    page: int
+    page_size: int

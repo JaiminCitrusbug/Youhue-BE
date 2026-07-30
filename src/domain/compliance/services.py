@@ -43,6 +43,44 @@ def write_audit(
     db.flush()
 
 
+def list_audit_logs(
+    db: Session,
+    *,
+    actor_id: uuid.UUID | None = None,
+    action: str | None = None,
+    school_id: uuid.UUID | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[list[AuditLog], int]:
+    """FR-20-05 (SC-080) — filtered, paginated read over the append-only `audit_logs` table.
+    READ ONLY: no `.update()`/`.delete()` exists here or anywhere else on `AuditLog` — the DB-level
+    triggers (migration c0ffee000001) additionally block UPDATE/DELETE server-side regardless.
+    `action` matches by substring (same "contains" convention `identity_db.list_schools` already
+    uses for `name_contains`), newest-first (matches the approved SC-080 screen's "newest first"
+    hint)."""
+    query = db.query(AuditLog)
+    if actor_id is not None:
+        query = query.filter(AuditLog.actor_id == actor_id)
+    if action:
+        query = query.filter(AuditLog.action.ilike(f"%{action}%"))
+    if school_id is not None:
+        query = query.filter(AuditLog.school_id == school_id)
+    if date_from is not None:
+        query = query.filter(AuditLog.at >= date_from)
+    if date_to is not None:
+        query = query.filter(AuditLog.at <= date_to)
+    total = query.count()
+    rows = (
+        query.order_by(AuditLog.at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return rows, total
+
+
 def get_by_id(db: Session, model: type[T], obj_id: uuid.UUID) -> T | None:
     return db.get(model, obj_id)
 

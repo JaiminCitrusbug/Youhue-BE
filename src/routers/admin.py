@@ -9,6 +9,10 @@ Endpoints:
   PATCH /api/v1/admin/schools/{id}           extend_trial | update_account | support_access
         (FR-19-02) — 200 on success; 409 the school's one trial extension is already used; 403 the
         actor's role lacks the action's permission (audit-logged); 500 on a persistence failure.
+  GET   /api/v1/admin/audit-log              filter (actor/action/school/date) + paginate the
+        immutable audit trail (FR-20-05, SC-080) — read-only, `view_audit_log`-gated.
+  GET   /api/v1/admin/audit-log/export       the same filtered set as a CSV extract — no
+        write/patch/delete endpoint exists on this table at any layer.
   GET   /api/v1/admin/_probe/seed-maintenance
         a representative role-gated probe (decision #3) so the NEGATIVE 403 scenario is genuinely
         exercised now: a permitted role -> 200, a limited role -> 403 (audit-logged). Real admin
@@ -19,10 +23,13 @@ and lockout-protected.
 """
 import logging
 import uuid
+from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 
+from src.application.audit_log import services as audit_log_svc
+from src.application.audit_log.services import AuditLogQuery
 from src.application.auth import admin as admin_svc
 from src.application.authz import admin as admin_authz
 from src.application.concern_words import services as concern_words_svc
@@ -38,6 +45,8 @@ from src.schemas.admin import (
     AdminSchoolAction,
     AdminSignIn,
     AdminSignInResponse,
+    AuditLogEntry,
+    AuditLogListResponse,
     DefaultWordListResponse,
     DefaultWordListUpdate,
     PlatformStatsResponse,
@@ -159,6 +168,85 @@ def get_platform_stats(admin: AdminDep, db: DbDep) -> PlatformStatsResponse:
         active_trials=stats.active_trials,
         checkin_volume=stats.checkin_volume,
         alert_volume=stats.alert_volume,
+    )
+
+
+# ---- FR-20-05: audit-log viewer (SC-080) — read-only, `view_audit_log`-gated -----------------
+# No PATCH/PUT/DELETE route exists on this table at any layer; the DB-level append-only triggers
+# (migration c0ffee000001) additionally block UPDATE/DELETE server-side regardless.
+
+def _audit_query(
+    actor_id: uuid.UUID | None,
+    action: str | None,
+    school_id: uuid.UUID | None,
+    date_from: datetime | None,
+    date_to: datetime | None,
+    page: int,
+    page_size: int,
+) -> AuditLogQuery:
+    return AuditLogQuery(
+        actor_id=actor_id,
+        action=action,
+        school_id=school_id,
+        date_from=date_from,
+        date_to=date_to,
+        page=max(page, 1),
+        page_size=max(1, min(page_size, audit_log_svc.MAX_PAGE_SIZE)),
+    )
+
+
+@router.get("/audit-log", response_model=AuditLogListResponse)
+def list_audit_log(
+    admin: AdminDep,
+    db: DbDep,
+    actor_id: uuid.UUID | None = None,
+    action: str | None = None,
+    school_id: uuid.UUID | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> AuditLogListResponse:
+    """SC-080 — filter + paginate the immutable audit trail, newest first. `view_audit_log`-gated
+    (403, audit-logged, otherwise)."""
+    query = _audit_query(actor_id, action, school_id, date_from, date_to, page, page_size)
+    try:
+        rows, total = audit_log_svc.list_audit_log(db, admin, query)
+    except HTTPException:
+        db.commit()  # persist the audit-logged RBAC denial before surfacing the error
+        raise
+    return AuditLogListResponse(
+        entries=[AuditLogEntry.model_validate(r) for r in rows],
+        total=total,
+        page=query.page,
+        page_size=query.page_size,
+    )
+
+
+@router.get("/audit-log/export")
+def export_audit_log(
+    admin: AdminDep,
+    db: DbDep,
+    actor_id: uuid.UUID | None = None,
+    action: str | None = None,
+    school_id: uuid.UUID | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+) -> Response:
+    """SC-080's "Export" control — the SAME filter as the list, as a CSV extract. Same
+    `view_audit_log` gate; capped at `MAX_EXPORT_ROWS` rows."""
+    query = _audit_query(
+        actor_id, action, school_id, date_from, date_to, 1, audit_log_svc.MAX_EXPORT_ROWS
+    )
+    try:
+        csv_body = audit_log_svc.export_audit_log(db, admin, query)
+    except HTTPException:
+        db.commit()  # persist the audit-logged RBAC denial before surfacing the error
+        raise
+    return Response(
+        content=csv_body,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=audit-log.csv"},
     )
 
 
