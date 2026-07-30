@@ -134,6 +134,15 @@ def _fail(delivery: AlertDelivery, *, reason: str) -> None:
         "fr_18_03_delivery_failed flag_id=%s recipient_id=%s attempts=%s reason=%s",
         delivery.flag_id, delivery.recipient_id, delivery.attempts, reason,
     )
+    if delivery.flag_id is not None:
+        # FR-12-04 (GATE G-7): a safeguarding alert's delivery failure is itself surfaced, never
+        # silently dropped — the ticket's own CRITICAL log, additive to INFRA-05's above (this
+        # function stays the single retry engine; reused, not owned, per FR-12-04's out-of-scope
+        # line). Gated on flag_id so non-alert notifications (invites etc.) never emit it.
+        logging.getLogger("youhue.risk").critical(
+            "fr_12_04_delivery_failed flag_id=%s recipient_id=%s attempts=%s",
+            delivery.flag_id, delivery.recipient_id, delivery.attempts,
+        )
 
 
 def confirm_delivery(

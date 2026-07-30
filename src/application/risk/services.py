@@ -16,7 +16,7 @@ from config.env_config import settings
 from src.application.authz import services as authz
 from src.application.derived import services as derived
 from src.application.notifications import services as notif_svc
-from src.constants.enums import FlagBand, FlagType, StaffRole
+from src.constants.enums import FlagBand, FlagEventType, FlagType, StaffRole
 from src.domain.checkin import services as checkin_db
 from src.domain.checkin.models import CheckIn
 from src.domain.identity import services as identity_db
@@ -221,15 +221,26 @@ def decide_band(risk_score: float) -> FlagBand:
     return FlagBand.none
 
 
-def _alert_configured_adults(db: Session, flag: Flag) -> int:
-    """Hand off to the configured adults for an immediate-band flag — ENQUEUES only (creates the
-    Notification + per-channel AlertDelivery rows via the existing INFRA-05/FR-18-03 path); it does
-    NOT itself send email or run the retry engine (that dispatch is owned by
-    `process_due_deliveries`, out of this ticket's scope per its own out-of-scope line). No
-    configured route (FR-12-05 not yet set for this school/alert_type, GATE G-5) means zero
-    recipients — a legitimate, non-error state, not a 500."""
+def dispatch_alert(db: Session, flag: Flag) -> int:
+    """FR-12-04 (GATE G-7): hand off an immediate-band flag to its school's configured adults by
+    email + in-app — ENQUEUES only (creates the Notification + per-channel AlertDelivery rows via
+    the existing INFRA-05/FR-18-03 path); it does NOT itself send email or run the retry engine
+    (owned by `process_due_deliveries` — reused, not owned, per this ticket's own out-of-scope
+    line). Called inline from `route_checkin` (FR-12-06) on an immediate-band routing decision, and
+    from `POST /api/v1/alerts/dispatch` for a standalone/system-triggered dispatch of an
+    already-routed flag.
+
+    Idempotent per flag (Baseline BR-05): a flag that already has an `alerted` FlagEvent is not
+    re-enqueued on retry (`has_flag_event`) — a retry never double-alerts. Recipients resolve ONLY
+    from the school's own FR-12-05 configuration (never invented) — dispatch is school-scoped
+    (BR-01). No configured route (FR-12-05 not yet set for this school/alert_type, GATE G-5) means
+    zero recipients — a legitimate, non-error state, not a 500."""
+    if risk_db.has_flag_event(db, flag.id, FlagEventType.alerted):
+        logger.info("fr_12_04_success flag=%s recipients=0 reason=already_alerted", flag.id)
+        return 0
     config = risk_db.get_alert_recipient_config(db, flag.school_id, "immediate")
     if config is None or not config.recipient_staff_ids:
+        logger.info("fr_12_04_success flag=%s recipients=0 reason=no_route", flag.id)
         return 0
     for recipient_id in config.recipient_staff_ids:
         notif_svc.enqueue(
@@ -240,6 +251,10 @@ def _alert_configured_adults(db: Session, flag: Flag) -> int:
             flag_id=flag.id,
         )
     risk_db.record_flag_alerted(db, flag.id)
+    logger.info(
+        "fr_12_04_success flag=%s school=%s recipients=%s",
+        flag.id, flag.school_id, len(config.recipient_staff_ids),
+    )
     return len(config.recipient_staff_ids)
 
 
@@ -260,7 +275,7 @@ def route_checkin(db: Session, checkin_id: uuid.UUID) -> tuple[FlagBand, uuid.UU
     band = decide_band(float(flag.risk_score))
     risk_db.set_flag_band(db, flag, band)
     if band == FlagBand.immediate:
-        _alert_configured_adults(db, flag)
+        dispatch_alert(db, flag)  # FR-12-04: hand off to the school's configured adults
     logger.info("fr_12_06_success checkin=%s flag=%s band=%s", checkin_id, flag.id, band.value)
     return band, flag.id
 

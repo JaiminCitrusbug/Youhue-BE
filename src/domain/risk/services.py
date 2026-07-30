@@ -202,11 +202,26 @@ def set_flag_band(db: Session, flag: Flag, band: FlagBand) -> Flag:
 
 def record_flag_alerted(db: Session, flag_id: uuid.UUID) -> FlagEvent:
     """Immutable event marking that an immediate-band flag's configured adults were alerted
-    (FR-12-06 hands off to the notification enqueue path; INFRA-05/FR-18-03 own actual delivery)."""
+    (FR-12-04 dispatch; INFRA-05/FR-18-03 own actual delivery)."""
     event = FlagEvent(flag_id=flag_id, event_type=FlagEventType.alerted, actor_id=None)
     db.add(event)
     db.flush()
     return event
+
+
+def has_flag_event(db: Session, flag_id: uuid.UUID, event_type: FlagEventType) -> bool:
+    """FR-12-04 (BR-05): has this flag already recorded an event of this type? The idempotency
+    check `dispatch_alert` uses before enqueueing — a retry of an already-alerted flag must not
+    double-alert. Read-only; same query-based idempotency posture as `get_open_flag`'s fast path
+    (good enough for retry-safety, not a true-concurrency backstop)."""
+    return (
+        db.scalar(
+            select(FlagEvent).where(
+                FlagEvent.flag_id == flag_id, FlagEvent.event_type == event_type
+            )
+        )
+        is not None
+    )
 
 
 def list_open_triage_flags(db: Session, school_id: uuid.UUID) -> list[Flag]:
