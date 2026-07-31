@@ -20,7 +20,7 @@ from src.constants.enums import FlagBand, FlagEventType, FlagStatus, FlagType, S
 from src.domain.checkin import services as checkin_db
 from src.domain.checkin.models import CheckIn
 from src.domain.identity import services as identity_db
-from src.domain.identity.models import StaffAccount
+from src.domain.identity.models import StaffAccount, Student
 from src.domain.risk import services as risk_db
 from src.domain.risk.models import AlertRecipientConfig, Flag
 
@@ -481,3 +481,43 @@ def get_guidance(db: Session, staff: StaffAccount, flag_id: uuid.UUID) -> Guidan
         "fr_13_04_success action=get_guidance actor_id=%s flag_id=%s", staff.id, flag.id
     )
     return guidance
+
+
+def get_flag_student(db: Session, staff: StaffAccount, flag_id: uuid.UUID) -> Student:
+    """FR-13-05: resolves a flag to its student for the guided-response screen's "send a private
+    note" action — GuidedResponseApp (FR-13-04) is reached via `flags/:flagId/guidance` and knows
+    only `flagId` (its own endpoint's DoD deliberately returns no student identity, frozen by
+    `test_guidance_is_advisory_only_no_gating_field`'s exact-keys assertion — not touched here); the
+    private-note compose screen needs a real `student_id` to POST to and a real name to show, so
+    this is the minimal read that resolves one without inventing a broader "flag detail" surface.
+    Same three-tier error shape + same involved-teacher gate as `get_guidance` above (reused, not
+    reinvented)."""
+    flag = risk_db.get_flag(db, flag_id)
+    if flag is None:
+        logger.info(
+            "fr_13_05_rejected action=resolve_flag_student actor_id=%s reason=not_found "
+            "flag_id=%s", staff.id, flag_id,
+        )
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Flag not found")
+    if flag.school_id != staff.school_id:
+        logger.warning(
+            "fr_13_05_forbidden action=resolve_flag_student actor_id=%s reason=cross_tenant "
+            "flag_id=%s", staff.id, flag_id,
+        )
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")
+    student = identity_db.get_student(db, flag.student_id)
+    if student is None:  # pragma: no cover - a flag's own student is never deleted from under it
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")
+    try:
+        authz.require_student_access(db, staff, student)
+    except HTTPException:
+        logger.warning(
+            "fr_13_05_forbidden action=resolve_flag_student actor_id=%s reason=not_involved "
+            "flag_id=%s", staff.id, flag_id,
+        )
+        raise
+    logger.info(
+        "fr_13_05_success action=resolve_flag_student actor_id=%s flag_id=%s student_id=%s",
+        staff.id, flag.id, student.id,
+    )
+    return student

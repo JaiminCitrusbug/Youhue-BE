@@ -1,13 +1,19 @@
 """Risk domain services — DB access only. M-12 is the sole writer of Flag."""
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from src.constants.enums import FlagBand, FlagEventType, FlagStatus, FlagType
-from src.domain.risk.models import AlertRecipientConfig, ConcernWordList, Flag, FlagEvent
+from src.domain.risk.models import (
+    AlertRecipientConfig,
+    ConcernWordList,
+    Flag,
+    FlagEvent,
+    SupportiveNote,
+)
 
 
 def get_concern_word_list(db: Session, school_id: uuid.UUID) -> ConcernWordList | None:
@@ -321,3 +327,74 @@ def create_flag(
     db.add(flag)
     db.flush()
     return flag
+
+
+# =================================================================================================
+# FR-13-05 — SupportiveNote: a teacher's quiet, private note to a student (table + model already
+# scaffolded at INFRA-02, migration 8ab7f8057e0a — this ticket is the first writer/reader).
+# =================================================================================================
+
+_NOTE_REPLAY_WINDOW = timedelta(seconds=10)
+
+
+def find_recent_duplicate_note(
+    db: Session, *, student_id: uuid.UUID, sender_id: uuid.UUID, body: str
+) -> SupportiveNote | None:
+    """Same (student_id, sender_id, body) within a short window -> a network RETRY of the exact
+    same send, not a deliberate second note (Baseline BR-05). The ticket's own DoD payload is
+    `{body: string}` only — no client-supplied idempotency key exists to dedupe on, so this mirrors
+    `checkin.services.submit_checkin`'s established "exact-content-within-a-window is a replay"
+    heuristic rather than inventing a new mechanism."""
+    cutoff = datetime.now(UTC) - _NOTE_REPLAY_WINDOW
+    return db.scalar(
+        select(SupportiveNote)
+        .where(
+            SupportiveNote.student_id == student_id,
+            SupportiveNote.sender_id == sender_id,
+            SupportiveNote.body == body,
+            SupportiveNote.at >= cutoff,
+        )
+        .order_by(SupportiveNote.at.desc())
+    )
+
+
+def create_supportive_note(
+    db: Session, *, student_id: uuid.UUID, sender_id: uuid.UUID, body: str
+) -> SupportiveNote:
+    note = SupportiveNote(
+        student_id=student_id, sender_id=sender_id, flag_id=None, body=body, is_private=True,
+    )
+    db.add(note)
+    db.flush()
+    return note
+
+
+def list_notes_for_student(db: Session, student_id: uuid.UUID) -> list[SupportiveNote]:
+    """Every private note addressed to this student, newest first — the STUDENT's own read path
+    (ticket DoD: "delivered privately to that student"). Never filtered by sender: the intended
+    student sees every note sent to them, regardless of which of their teachers sent it."""
+    return list(
+        db.scalars(
+            select(SupportiveNote)
+            .where(SupportiveNote.student_id == student_id)
+            .order_by(SupportiveNote.at.desc())
+        )
+    )
+
+
+def list_notes_for_student_and_sender(
+    db: Session, student_id: uuid.UUID, sender_id: uuid.UUID
+) -> list[SupportiveNote]:
+    """The SENDER's own read path (ticket DoD: "...and the sender only, and to no other user") —
+    filtered to notes THIS staff member sent, even if a co-teacher shares class access to the same
+    student: sharing student access never implies sharing visibility into someone else's note."""
+    return list(
+        db.scalars(
+            select(SupportiveNote)
+            .where(
+                SupportiveNote.student_id == student_id,
+                SupportiveNote.sender_id == sender_id,
+            )
+            .order_by(SupportiveNote.at.desc())
+        )
+    )

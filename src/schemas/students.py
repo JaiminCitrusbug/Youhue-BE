@@ -1,5 +1,6 @@
 """Student request/response schemas."""
 import uuid
+from datetime import datetime
 
 from pydantic import BaseModel
 
@@ -22,3 +23,27 @@ class StudentDetailOut(BaseModel):
     mood_history: list[MoodPointOut]
     reflections: list[ReflectionPointOut]
     participation_rate: float
+
+
+class NoteCreate(BaseModel):
+    """FR-13-05 (SC-041) — POST /api/v1/students/{id}/notes body. Ticket's own exact DoD payload:
+    `body: string` only (no flag_id, no visibility flag — the note is always private, never a
+    caller-set choice)."""
+
+    body: str
+
+
+class NoteOut(BaseModel):
+    """FR-13-05 — POST response, ticket's own exact DoD shape: `201 { note_id }`."""
+
+    note_id: uuid.UUID
+
+
+class NoteListItemOut(BaseModel):
+    note_id: uuid.UUID
+    body: str
+    at: datetime
+
+
+class NoteListResponse(BaseModel):
+    notes: list[NoteListItemOut]

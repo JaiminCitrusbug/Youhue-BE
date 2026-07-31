@@ -10,8 +10,12 @@ FR-13-04/05 and `escalated` by FR-12-08; this endpoint renders whatever rows are
 GET /flags/{id}/guidance (FR-13-04) — advisory wording/next-steps/links for the teacher opening the
 response to a flagged check-in. No persistence, read-only.
 
+GET /flags/{id}/student (FR-13-05) — resolves a flag to its student (id + display name) so the
+guided-response screen's "send a private note" action can navigate somewhere real; deliberately
+NOT merged into GuidanceOut (frozen by FR-13-04's own exact-keys test).
+
 Thin router — business logic lives in src.domain.risk.services (events) and
-src.application.risk.services (guidance).
+src.application.risk.services (guidance, flag->student resolution).
 """
 import logging
 import uuid
@@ -28,7 +32,13 @@ from src.infrastructure.middlewares.auth_middleware import (
     StaffDep,
     require_same_school,
 )
-from src.schemas.risk import FlagEventOut, FlagEventsResponse, GuidanceLinkOut, GuidanceOut
+from src.schemas.risk import (
+    FlagEventOut,
+    FlagEventsResponse,
+    FlagStudentOut,
+    GuidanceLinkOut,
+    GuidanceOut,
+)
 
 logger = logging.getLogger("youhue.risk")
 router = APIRouter(prefix="/flags", tags=["flags"])
@@ -97,3 +107,29 @@ def get_guidance(flag_id: uuid.UUID, staff: StaffDep, db: DbDep) -> GuidanceOut:
         next_steps=guidance.next_steps,
         links=[GuidanceLinkOut(label=label) for label in guidance.links],
     )
+
+
+@router.get(
+    "/{flag_id}/student",
+    response_model=FlagStudentOut,
+    responses={
+        status.HTTP_403_FORBIDDEN: {
+            "description": "Caller is not the involved teacher for this flag, or cross-tenant.",
+        },
+        status.HTTP_404_NOT_FOUND: {"description": "No such flag."},
+    },
+)
+def get_flag_student(flag_id: uuid.UUID, staff: StaffDep, db: DbDep) -> FlagStudentOut:
+    """FR-13-05: the minimal identity a flag resolves to (id + display name), so the guided
+    -response "send a private note" action has a real `student_id` to POST to and a real name to
+    show. Same involved-teacher gate as `/guidance` above (reused, not reinvented)."""
+    try:
+        student = risk_svc.get_flag_student(db, staff, flag_id)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - last-resort guard, never leak an unhandled 500
+        logger.exception("fr_13_05_error action=resolve_flag_student flag_id=%s", flag_id)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not resolve this flag's student"
+        ) from exc
+    return FlagStudentOut(student_id=student.id, student_name=student.display_name)

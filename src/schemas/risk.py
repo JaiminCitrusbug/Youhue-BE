@@ -120,3 +120,13 @@ class GuidanceOut(BaseModel):
     suggested_wording: str
     next_steps: list[str]
     links: list[GuidanceLinkOut]
+
+
+class FlagStudentOut(BaseModel):
+    """FR-13-05 — GET /api/v1/flags/{id}/student. The minimal identity a flag resolves to, so the
+    guided-response screen's "send a private note" action can navigate to a real `student_id` and
+    show a real name — deliberately NOT merged into `GuidanceOut` above (frozen by FR-13-04's own
+    `test_guidance_is_advisory_only_no_gating_field` exact-keys assertion)."""
+
+    student_id: uuid.UUID
+    student_name: str
