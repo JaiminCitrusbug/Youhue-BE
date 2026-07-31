@@ -1,10 +1,21 @@
-"""FR-17-04: Subscription lifecycle action responses (downgrade / mid-term cancellation)."""
+"""FR-17-04: Subscription lifecycle action responses (downgrade / mid-term cancellation).
+FR-17-06: informational pricing-model response."""
 import uuid
 from datetime import datetime
 
 from pydantic import BaseModel
 
 from src.constants.enums import SubscriptionState, SubscriptionTier
+
+
+class PricingOut(BaseModel):
+    """200 body for `GET /api/v1/pricing` — the MODEL only (ticket Do-NOT: never a ratified
+    per-student number, BRD Appendix A pending client ratification). The three literal values are
+    fixed by the ticket's own DoD line, not a config a caller can influence."""
+
+    model: str
+    by_quote: bool
+    tax: str
 
 
 class SubscriptionActionResponse(BaseModel):

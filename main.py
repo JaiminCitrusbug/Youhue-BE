@@ -20,6 +20,7 @@ from src.routers.health import router as health_router
 from src.routers.invitations import router as invitations_router
 from src.routers.leadership import router as leadership_router
 from src.routers.notifications import router as notifications_router
+from src.routers.pricing import router as pricing_router
 from src.routers.risk import router as risk_router
 from src.routers.schools import router as schools_router
 from src.routers.staff_auth import router as staff_auth_router
@@ -50,3 +51,4 @@ app.include_router(entitlements_router, prefix=settings.api_prefix)
 app.include_router(staff_lifecycle_router, prefix=settings.api_prefix)
 app.include_router(activities_router, prefix=settings.api_prefix)
 app.include_router(subscriptions_router, prefix=settings.api_prefix)
+app.include_router(pricing_router, prefix=settings.api_prefix)
