@@ -15,10 +15,11 @@ from typing import Any
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from src.constants.enums import AlertChannel, DeliveryStatus
+from src.constants.enums import AlertChannel, DeliveryStatus, FlagEventType
 from src.domain.billing import services as billing_db
 from src.domain.billing.models import Notification
 from src.domain.identity import services as identity_db
+from src.domain.risk import services as risk_db
 from src.domain.risk.models import AlertDelivery
 from src.infrastructure.emailer import send_email
 
@@ -116,11 +117,11 @@ def process_due_deliveries(db: Session) -> int:
 def _attempt_email(db: Session, delivery: AlertDelivery) -> None:
     recipient = identity_db.get_staff(db, delivery.recipient_id)
     if recipient is None:
-        _fail(delivery, reason="unknown recipient")
+        _fail(db, delivery, reason="unknown recipient")
         return
     notification = billing_db.get_notification(db, delivery.notification_id)
     if notification is None:
-        _fail(delivery, reason="unknown notification")
+        _fail(db, delivery, reason="unknown notification")
         return
     delivery.attempts += 1
     try:
@@ -134,7 +135,7 @@ def _attempt_email(db: Session, delivery: AlertDelivery) -> None:
         )
     except Exception:  # noqa: BLE001 - any send error is retried with backoff, never dropped
         if delivery.attempts >= MAX_ATTEMPTS:
-            _fail(delivery, reason="max attempts exhausted")
+            _fail(db, delivery, reason="max attempts exhausted")
         else:
             delivery.status = DeliveryStatus.retrying
             delivery.next_attempt_at = _now() + backoff_delay(delivery.attempts)
@@ -144,7 +145,7 @@ def _attempt_email(db: Session, delivery: AlertDelivery) -> None:
             )
 
 
-def _fail(delivery: AlertDelivery, *, reason: str) -> None:
+def _fail(db: Session, delivery: AlertDelivery, *, reason: str) -> None:
     delivery.status = DeliveryStatus.failed
     delivery.next_attempt_at = None
     # CRITICAL, surfaced to ops per DoD — fields: flag_id, recipient_id, attempts (no PII/payload).
@@ -161,6 +162,15 @@ def _fail(delivery: AlertDelivery, *, reason: str) -> None:
             "fr_12_04_delivery_failed flag_id=%s recipient_id=%s attempts=%s",
             delivery.flag_id, delivery.recipient_id, delivery.attempts,
         )
+        # FR-12-08 (GATE G-8 sibling): an ESCALATION delivery's failure is surfaced under its own
+        # ticket-owned log key too — additive only, gated on an existing `escalated` FlagEvent for
+        # this flag so the fr_12_04 line above (the original-dispatch failure) is untouched either
+        # way; reuses INFRA-05's retry engine, does not own it, same posture as FR-12-04's own note.
+        if risk_db.has_flag_event(db, delivery.flag_id, FlagEventType.escalated):
+            logging.getLogger("youhue.risk").critical(
+                "fr_12_08_delivery_failed flag_id=%s recipient_id=%s attempts=%s",
+                delivery.flag_id, delivery.recipient_id, delivery.attempts,
+            )
 
 
 def confirm_delivery(

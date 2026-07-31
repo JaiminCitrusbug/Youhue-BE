@@ -76,6 +76,22 @@ class AlertConfigResponse(BaseModel):
     config: AlertConfigOut
 
 
+class AlertEscalateResponse(BaseModel):
+    """FR-12-08 (GATE G-8) — POST /api/v1/alerts/{flagId}/escalate response."""
+
+    flag_id: uuid.UUID
+    escalated_to: uuid.UUID
+
+
+class AlertAcknowledgeResponse(BaseModel):
+    """FR-12-08 — POST /api/v1/alerts/{flagId}/acknowledge response. Structural minimum this
+    ticket adds (no acknowledge endpoint pre-existed anywhere) so GATE G-8's negative rule — an
+    acknowledged alert does not escalate — is testable end-to-end."""
+
+    flag_id: uuid.UUID
+    status: str
+
+
 class FlagEventOut(BaseModel):
     """FR-12-09 — one row of a flag's immutable timeline."""
 

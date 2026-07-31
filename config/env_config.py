@@ -97,6 +97,12 @@ class Settings(BaseSettings):
     # platform default concern-word list (school lists override; PLACEHOLDER — needs ratification)
     default_concern_words: str = "hurt,scared,alone,hate,worthless,hopeless,unsafe,help"
 
+    # ---- alert escalation (FR-12-08, GATE G-8) — env-driven, not hard-coded per the ticket's own
+    # DoD ("The escalation time is set during configuration"). The scheduled process
+    # (`process_due_escalations`) escalates an alerted, unacknowledged flag once its `alerted`
+    # FlagEvent is older than this many minutes.
+    alert_ack_timeout_minutes: int = 15
+
     # ---- class dashboard mood index (FR-10-01) — D-18 weighting is NOT ratified. Interim,
     # env-driven default: unweighted arithmetic mean of in-window CheckIn.mood_value (0..5),
     # scaled *2 onto the approved screen's 0..10 display range. Same placeholder-pending-

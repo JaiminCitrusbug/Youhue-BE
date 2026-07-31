@@ -16,7 +16,7 @@ from config.env_config import settings
 from src.application.authz import services as authz
 from src.application.derived import services as derived
 from src.application.notifications import services as notif_svc
-from src.constants.enums import FlagBand, FlagEventType, FlagType, StaffRole
+from src.constants.enums import FlagBand, FlagEventType, FlagStatus, FlagType, StaffRole
 from src.domain.checkin import services as checkin_db
 from src.domain.checkin.models import CheckIn
 from src.domain.identity import services as identity_db
@@ -29,6 +29,7 @@ logger = logging.getLogger("youhue.risk")
 CONCERN_WORD_SCORE = 0.90
 SLOW_BURN_SCORE = 0.70
 _ALLOWED_ALERT_TYPES = ("immediate", "triage")
+_ESCALATION_ALERT_TYPE = "immediate"  # only immediate-band flags are ever alerted (dispatch_alert)
 
 
 @dataclass
@@ -263,6 +264,105 @@ def dispatch_alert(db: Session, flag: Flag) -> int:
         flag.id, flag.school_id, len(config.recipient_staff_ids),
     )
     return len(config.recipient_staff_ids)
+
+
+def escalate_alert(db: Session, flag: Flag) -> uuid.UUID:
+    """FR-12-08 (GATE G-8): escalate an already-alerted, unacknowledged flag to the NEXT adult in
+    FR-12-05's ordered recipient list — never an arbitrary next adult. Reuses INFRA-05's transport
+    (`notif_svc.enqueue`) for the escalation send; does not own it (out-of-scope line).
+
+    Recipient-order reconciliation (real mismatch, not silently resolved): `dispatch_alert`
+    (FR-12-04, as-built) enqueues to EVERY configured recipient at once (loops the whole
+    `recipient_staff_ids` list), not to a single "first responder" only. There is therefore no
+    separate person left who hasn't already heard from the original alert to anchor "next" on. The
+    only interpretation consistent with "walks the ordered list, not an arbitrary next adult" and
+    with this ticket's own test requirement (assert the exact recipient matches FR-12-05's
+    configured order) is positional: `recipient_staff_ids[0]` is treated as the primary/first
+    adult and `recipient_staff_ids[1]` — the NEXT one in that same order — is the escalation
+    target. A config with fewer than 2 recipients has no next adult to escalate to (422, logged
+    rejected — a legitimate non-error state, same posture as FR-12-04's "no configured route").
+
+    ACID + idempotent (Baseline BR-05): a flag already escalated returns the SAME `escalated_to` on
+    retry and never re-sends (checked via the existing `escalated` FlagEvent — the same
+    read-before-write posture `dispatch_alert` uses for `alerted`). GATE G-8's own guard — an
+    ACKNOWLEDGED flag is a 409 conflict — is checked BEFORE the idempotent-retry short-circuit, so
+    an acknowledgement recorded after a flag was already (successfully) escalated can never
+    silently "un-conflict" a later retry of the same call."""
+    if not risk_db.has_flag_event(db, flag.id, FlagEventType.alerted):
+        logger.info("fr_12_08_rejected action=escalate flag=%s reason=not_yet_alerted", flag.id)
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Flag has not been alerted yet")
+    if flag.status == FlagStatus.acknowledged:
+        logger.info(
+            "fr_12_08_rejected action=escalate flag=%s reason=already_acknowledged", flag.id
+        )
+        raise HTTPException(status.HTTP_409_CONFLICT, "Alert has already been acknowledged")
+    existing = risk_db.get_flag_event(db, flag.id, FlagEventType.escalated)
+    if existing is not None:
+        if existing.actor_id is None:  # pragma: no cover - invariant: always set below
+            raise RuntimeError(f"escalated FlagEvent missing actor_id for flag_id={flag.id}")
+        logger.info(
+            "fr_12_08_success action=escalate flag=%s escalated_to=%s reason=idempotent_retry",
+            flag.id, existing.actor_id,
+        )
+        return existing.actor_id
+    config = risk_db.get_alert_recipient_config(db, flag.school_id, _ESCALATION_ALERT_TYPE)
+    ordered = config.recipient_staff_ids if config is not None else []
+    if len(ordered) < 2:
+        logger.info("fr_12_08_rejected action=escalate flag=%s reason=no_next_recipient", flag.id)
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "No further configured adult to escalate to"
+        )
+    escalated_to = ordered[1]  # the next adult after whoever the original dispatch already reached
+    notif_svc.enqueue(
+        db,
+        recipient_id=escalated_to,
+        ntype="risk_alert_escalation",
+        payload={"flag_id": str(flag.id), "band": "immediate", "reason": flag.type.value},
+        flag_id=flag.id,
+    )
+    risk_db.record_flag_escalated(db, flag.id, escalated_to)
+    risk_db.set_flag_status(db, flag, FlagStatus.escalated)
+    logger.info(
+        "fr_12_08_success action=escalate flag=%s school=%s escalated_to=%s",
+        flag.id, flag.school_id, escalated_to,
+    )
+    return escalated_to
+
+
+def acknowledge_alert(db: Session, flag: Flag) -> Flag:
+    """Structural minimum this ticket needs to make GATE G-8's negative rule testable end-to-end —
+    no acknowledge concept pre-existed anywhere in this codebase before this ticket (no
+    `acknowledged_at`-style field, no acknowledge endpoint; confirmed by reading FR-12-04/05/06/09
+    and grepping the whole worktree). Sets `Flag.status -> acknowledged`; idempotent (an
+    already-acknowledged flag is a no-op success, not an error) and still legal after an escalation
+    (a late ack no longer prevents the escalation that already happened, but is still recorded)."""
+    if flag.status != FlagStatus.acknowledged:
+        risk_db.set_flag_status(db, flag, FlagStatus.acknowledged)
+    logger.info("fr_12_08_success action=acknowledge flag=%s", flag.id)
+    return flag
+
+
+def process_due_escalations(db: Session) -> int:
+    """FR-12-08: the scheduled/background system process. Walks open, alerted flags whose
+    `alerted` event is older than the env-configurable `settings.alert_ack_timeout_minutes` and
+    still unacknowledged, escalating each. A per-item commit mirrors `process_pending`'s poison-item
+    isolation — one flag that can't escalate (already raced to acknowledged/escalated, or has no
+    next recipient configured) never sinks the pass; an unexpected error is logged and surfaced,
+    never silently dropped, matching this ticket's own Baseline BR-05 line."""
+    cutoff = _utcnow() - timedelta(minutes=settings.alert_ack_timeout_minutes)
+    due = risk_db.list_flags_due_for_escalation(db, cutoff)
+    processed = 0
+    for flag in due:
+        try:
+            escalate_alert(db, flag)
+            db.commit()
+            processed += 1
+        except HTTPException:
+            db.rollback()  # already acknowledged / no next recipient -> not a pass failure
+        except Exception:  # noqa: BLE001 - one poison flag must not sink the whole scheduled pass
+            db.rollback()
+            logger.error("fr_12_08_error action=process_due_escalations flag=%s", flag.id)
+    return processed
 
 
 def route_checkin(db: Session, checkin_id: uuid.UUID) -> tuple[FlagBand, uuid.UUID | None]:

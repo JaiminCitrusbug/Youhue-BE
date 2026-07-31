@@ -1,5 +1,6 @@
 """Risk domain services — DB access only. M-12 is the sole writer of Flag."""
 import uuid
+from datetime import datetime
 
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -221,6 +222,55 @@ def has_flag_event(db: Session, flag_id: uuid.UUID, event_type: FlagEventType) -
             )
         )
         is not None
+    )
+
+
+def get_flag_event(db: Session, flag_id: uuid.UUID, event_type: FlagEventType) -> FlagEvent | None:
+    """The single row of this event type for a flag, if any. Unlike `has_flag_event` (bool-only
+    fast path), this returns the row itself — FR-12-08 needs it to re-read WHO an already-escalated
+    flag went to on an idempotent retry (BR-05), not just whether escalation already happened."""
+    return db.scalar(
+        select(FlagEvent).where(FlagEvent.flag_id == flag_id, FlagEvent.event_type == event_type)
+    )
+
+
+def record_flag_escalated(db: Session, flag_id: uuid.UUID, escalated_to: uuid.UUID) -> FlagEvent:
+    """FR-12-08: immutable event marking the flag's escalation. `actor_id` carries the ESCALATION
+    TARGET here (mirrors FR-12-09's own read-surface docstring: "...who was escalated-to...") —
+    escalation, like `alerted`, is system-triggered (no human actor performs it), but unlike
+    `alerted` (which may reach several recipients at once) escalation always names exactly one
+    next adult, so recording that adult as the event's `actor` is the one meaningful value to
+    keep."""
+    event = FlagEvent(flag_id=flag_id, event_type=FlagEventType.escalated, actor_id=escalated_to)
+    db.add(event)
+    db.flush()
+    return event
+
+
+def set_flag_status(db: Session, flag: Flag, status: FlagStatus) -> Flag:
+    """FR-12-08 (+ acknowledge): the single writer of `Flag.status` past its `open` default.
+    Mirrors `set_flag_band`'s shape — flush only, caller commits."""
+    flag.status = status
+    db.flush()
+    return flag
+
+
+def list_flags_due_for_escalation(db: Session, cutoff: datetime) -> list[Flag]:
+    """FR-12-08: the scheduled process's own candidate set — open (unacknowledged, not yet
+    escalated) flags whose `alerted` event is older than `cutoff`. A flag never alerted (no
+    `alerted` FlagEvent row) never qualifies; an acknowledged/escalated/actioned/closed flag is
+    excluded by the `status == open` filter alone (GATE G-8's guard lives here structurally, not
+    just in `escalate_alert`'s own check)."""
+    return list(
+        db.scalars(
+            select(Flag)
+            .join(FlagEvent, FlagEvent.flag_id == Flag.id)
+            .where(
+                Flag.status == FlagStatus.open,
+                FlagEvent.event_type == FlagEventType.alerted,
+                FlagEvent.at <= cutoff,
+            )
+        )
     )
 
 
