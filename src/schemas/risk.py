@@ -74,3 +74,15 @@ class AlertConfigOut(BaseModel):
 
 class AlertConfigResponse(BaseModel):
     config: AlertConfigOut
+
+
+class FlagEventOut(BaseModel):
+    """FR-12-09 — one row of a flag's immutable timeline."""
+
+    type: str  # alerted | viewed | acted | escalated
+    actor: str | None = None  # resolved staff email; null for a system-recorded event (alerted)
+    at: datetime
+
+
+class FlagEventsResponse(BaseModel):
+    events: list[FlagEventOut]

@@ -224,6 +224,15 @@ def has_flag_event(db: Session, flag_id: uuid.UUID, event_type: FlagEventType) -
     )
 
 
+def list_flag_events(db: Session, flag_id: uuid.UUID) -> list[FlagEvent]:
+    """FR-12-09: a flag's full immutable timeline, chronological (oldest first) — alerted
+    (FR-12-04), viewed/acted (FR-13-04/05), escalated (FR-12-08). Read-only; this module writes no
+    new event type — `record_flag_alerted` above remains the sole writer this ticket touches."""
+    return list(
+        db.scalars(select(FlagEvent).where(FlagEvent.flag_id == flag_id).order_by(FlagEvent.at))
+    )
+
+
 def list_open_triage_flags(db: Session, school_id: uuid.UUID) -> list[Flag]:
     """SC-038 triage queue: open, triage-band flags for a school, oldest first (human review
     order) — read-only, render-only surface (GATE G-9: no automated action follows from a read)."""

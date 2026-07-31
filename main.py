@@ -16,6 +16,7 @@ from src.routers.calendar import router as calendar_router
 from src.routers.checkins import router as checkins_router
 from src.routers.classes import router as classes_router
 from src.routers.entitlements import router as entitlements_router
+from src.routers.flags import router as flags_router
 from src.routers.health import router as health_router
 from src.routers.invitations import router as invitations_router
 from src.routers.leadership import router as leadership_router
@@ -42,6 +43,7 @@ app.include_router(students_router, prefix=settings.api_prefix)
 app.include_router(notifications_router, prefix=settings.api_prefix)
 app.include_router(risk_router, prefix=settings.api_prefix)
 app.include_router(alerts_router, prefix=settings.api_prefix)
+app.include_router(flags_router, prefix=settings.api_prefix)
 app.include_router(calendar_router, prefix=settings.api_prefix)
 app.include_router(checkins_router, prefix=settings.api_prefix)
 app.include_router(invitations_router, prefix=settings.api_prefix)
