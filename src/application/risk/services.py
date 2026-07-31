@@ -39,6 +39,13 @@ class ScoreResult:
     flag_id: uuid.UUID | None
 
 
+@dataclass
+class GuidanceContent:
+    suggested_wording: str
+    next_steps: list[str]
+    links: list[str]
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
@@ -309,3 +316,68 @@ def process_pending(db: Session) -> int:
                 )
             db.commit()
     return processed
+
+
+def build_guidance(flag: Flag) -> GuidanceContent:
+    """FR-13-04: pure, derive-only guidance content keyed off the flag's OWN detector type + band
+    — no persistence, no student action, no invented clinical directive. Advisory copy only: every
+    next step reads as a suggestion the teacher may use, adapt or ignore (ticket §Must-nots), never
+    a mandated action."""
+    if flag.type == FlagType.concern_word:
+        context = "something in their check-in stood out to you"
+    else:  # slow_burn
+        context = "their mood has stayed low for a few days"
+    suggested_wording = (
+        f'"Hi, I noticed {context} — I just wanted to check in. How are you doing, really?"'
+    )
+    next_steps = [
+        "Find a quiet, low-pressure moment to check in — not in front of peers.",
+        "Listen first; you don't need to have all the answers.",
+        "Let your school's designated safeguarding lead know what you noticed.",
+    ]
+    if flag.band == FlagBand.immediate:
+        next_steps.append("Given the urgency, consider following up the same day if you can.")
+    links = [
+        "School safeguarding steps",
+        "Talking with a student who seems low",
+        "When and how to escalate",
+    ]
+    return GuidanceContent(suggested_wording=suggested_wording, next_steps=next_steps, links=links)
+
+
+def get_guidance(db: Session, staff: StaffAccount, flag_id: uuid.UUID) -> GuidanceContent:
+    """FR-13-04 (SC-040): advisory guidance for the teacher opening the response to a flagged
+    check-in. Read restricted to the INVOLVED teacher (403 otherwise) — reuses FR-10-02's
+    `authz.require_student_access` (own/shared class scope), the established "who is involved with
+    this student" primitive in this codebase; there is no separate per-flag assignment concept to
+    invent. Same three-tier error shape as `students_svc.get_student_detail`: unknown flag -> 404,
+    cross-tenant -> 403, out-of-scope teacher -> 403. Read-only: no write, no commit, no action."""
+    flag = risk_db.get_flag(db, flag_id)
+    if flag is None:
+        logger.info(
+            "fr_13_04_rejected action=get_guidance actor_id=%s reason=not_found flag_id=%s",
+            staff.id, flag_id,
+        )
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Flag not found")
+    if flag.school_id != staff.school_id:
+        logger.warning(
+            "fr_13_04_forbidden action=get_guidance actor_id=%s reason=cross_tenant flag_id=%s",
+            staff.id, flag_id,
+        )
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")
+    student = identity_db.get_student(db, flag.student_id)
+    if student is None:  # pragma: no cover - a flag's own student is never deleted from under it
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Access denied")
+    try:
+        authz.require_student_access(db, staff, student)  # the "involved teacher" check
+    except HTTPException:
+        logger.warning(
+            "fr_13_04_forbidden action=get_guidance actor_id=%s reason=not_involved flag_id=%s",
+            staff.id, flag_id,
+        )
+        raise
+    guidance = build_guidance(flag)
+    logger.info(
+        "fr_13_04_success action=get_guidance actor_id=%s flag_id=%s", staff.id, flag.id
+    )
+    return guidance

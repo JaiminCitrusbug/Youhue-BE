@@ -86,3 +86,21 @@ class FlagEventOut(BaseModel):
 
 class FlagEventsResponse(BaseModel):
     events: list[FlagEventOut]
+
+
+class GuidanceLinkOut(BaseModel):
+    """FR-13-04 — one advisory "useful link" entry. Label only (no live destination URL exists
+    yet in this codebase); matches the approved GuidedResponse.tsx (SC-040) `links[].label` shape,
+    the FE supplies its own icon."""
+
+    label: str
+
+
+class GuidanceOut(BaseModel):
+    """FR-13-04 — GET /api/v1/flags/{id}/guidance. Advisory only (suggested wording, sensible
+    next steps, useful links) a teacher may use, adapt or ignore when responding to a flagged
+    check-in; nothing here is persisted, forced or auto-applied."""
+
+    suggested_wording: str
+    next_steps: list[str]
+    links: list[GuidanceLinkOut]

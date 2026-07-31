@@ -1,20 +1,34 @@
-"""Flag timeline read (FR-12-09). The immutable, append-only audit trail around a Flag — who was
+"""Flag-response endpoints.
+
+GET /flags/{id}/events (FR-12-09) — the immutable, append-only audit trail around a Flag: who was
 alerted, who viewed, who acted, who was escalated-to, and when. The `FlagEvent` table + its DB-level
 append-only trigger already exist (INFRA-02 migration 8ab7f8057e0a; immutability trigger
 c0ffee000001), and FR-12-04 already writes the `alerted` row (`risk_db.record_flag_alerted`, called
-from `dispatch_alert`) — this ticket adds ONLY the read surface below. `viewed`/`acted` are written
-by FR-13-04/05 and `escalated` by FR-12-08, neither of which exists yet; this endpoint renders
-whatever rows are present. Thin router — the read itself lives in `src.domain.risk.services`."""
+from `dispatch_alert`) — FR-12-09 adds ONLY the read surface below. `viewed`/`acted` are written by
+FR-13-04/05 and `escalated` by FR-12-08; this endpoint renders whatever rows are present.
+
+GET /flags/{id}/guidance (FR-13-04) — advisory wording/next-steps/links for the teacher opening the
+response to a flagged check-in. No persistence, read-only.
+
+Thin router — business logic lives in src.domain.risk.services (events) and
+src.application.risk.services (guidance).
+"""
 import logging
 import uuid
 
 from fastapi import APIRouter, HTTPException, status
 
+from src.application.risk import services as risk_svc
 from src.constants.enums import SessionKind
 from src.domain.identity import services as identity_db
 from src.domain.risk import services as risk_db
-from src.infrastructure.middlewares.auth_middleware import DbDep, SessionDep, require_same_school
-from src.schemas.risk import FlagEventOut, FlagEventsResponse
+from src.infrastructure.middlewares.auth_middleware import (
+    DbDep,
+    SessionDep,
+    StaffDep,
+    require_same_school,
+)
+from src.schemas.risk import FlagEventOut, FlagEventsResponse, GuidanceLinkOut, GuidanceOut
 
 logger = logging.getLogger("youhue.risk")
 router = APIRouter(prefix="/flags", tags=["flags"])
@@ -53,3 +67,33 @@ def list_events(flag_id: uuid.UUID, sess: SessionDep, db: DbDep) -> FlagEventsRe
         ) from exc
     logger.info("fr_12_09_success flag=%s count=%s", flag_id, len(out))
     return FlagEventsResponse(events=out)
+
+
+@router.get(
+    "/{flag_id}/guidance",
+    response_model=GuidanceOut,
+    responses={
+        status.HTTP_403_FORBIDDEN: {
+            "description": "Caller is not the involved teacher for this flag, or cross-tenant.",
+        },
+        status.HTTP_404_NOT_FOUND: {"description": "No such flag."},
+    },
+)
+def get_guidance(flag_id: uuid.UUID, staff: StaffDep, db: DbDep) -> GuidanceOut:
+    """FR-13-04 (SC-040): suggested wording, sensible next steps and useful links for a teacher
+    responding to a worrying check-in. Advisory only — the teacher may use, adapt or ignore every
+    suggestion; nothing here forces, requires or auto-applies an action (ticket §Must-nots)."""
+    try:
+        guidance = risk_svc.get_guidance(db, staff, flag_id)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - last-resort guard, never leak an unhandled 500
+        logger.exception("fr_13_04_error action=get_guidance flag_id=%s", flag_id)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not resolve guidance"
+        ) from exc
+    return GuidanceOut(
+        suggested_wording=guidance.suggested_wording,
+        next_steps=guidance.next_steps,
+        links=[GuidanceLinkOut(label=label) for label in guidance.links],
+    )
